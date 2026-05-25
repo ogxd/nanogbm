@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `nanogbm` is a pure-Rust gradient boosting library, deliberately scoped to a narrow subset: **GBDT boosting only**, **binary logistic objective only**, **binary_logloss metric only**, CPU only, dense numerical features with missing-value handling. No DART/GOSS/RF, no categorical features, no sparse input, no GPU, no FFI. Keep changes within this scope unless explicitly asked to expand it.
 
-The library crate, the CLI binary, and the workspace are all called `nanogbm`.
+The library crate and the workspace are both called `nanogbm`.
 
 Rust edition is **2024** (workspace-wide). Training is currently **single-threaded** — `TimingBuckets` uses `Cell` precisely because nothing runs in parallel. Treat any parallelism as a future change, not present state.
 
@@ -17,7 +17,6 @@ cargo build --release
 cargo test --release                              # unit tests + tests/e2e.rs
 cargo test --release -p nanogbm <name>            # single test by name substring
 cargo test --release --test e2e                   # only the e2e integration suite
-cargo run --release -p nanogbm-cli -- <args>      # CLI (binary name: `nanogbm`)
 cargo clippy --all-targets --release
 cargo fmt
 ```
@@ -26,11 +25,10 @@ Always prefer `--release` — debug builds of the training loop are orders of ma
 
 ## Workspace layout
 
-Two crates:
+Single crate:
 - `nanogbm/` — the library. Public re-exports from `lib.rs`: `Config`, `Dataset`, `DatasetBuilder`, `GbdtTrainer`, `Model`, `Error`, `Result`, plus the `predict` module.
-- `nanogbm-cli/` — thin CSV-driven train/predict wrapper.
 
-Workspace deps: `serde`, `bincode` v2 (with the `serde` feature), `rand` + `rand_chacha`, `thiserror`, `csv`. No `rayon`, no math crates — everything is hand-rolled.
+Workspace deps: `serde`, `bincode` v2 (with the `serde` feature), `rand` + `rand_chacha`, `thiserror`. No `rayon`, no math crates — everything is hand-rolled.
 
 ## How it works internally (big picture)
 
