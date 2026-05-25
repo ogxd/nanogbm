@@ -4,8 +4,8 @@
 //!
 //! Run with: `cargo run --release --example missing_and_importance`
 
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 use nanogbm::predict::predict_proba;
+use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn main() {
     let n = 2000;
@@ -29,8 +29,12 @@ fn main() {
         labels[i] = if z > 0.0 { 1.0 } else { 0.0 };
 
         // Sprinkle ~10% NaNs into feature 3 (a noise column) and feature 0 (predictive).
-        if rand() > 0.8 { features[i * d + 3] = f64::NAN; }
-        if rand() > 0.9 { features[i * d] = f64::NAN; }
+        if rand() > 0.8 {
+            features[i * d + 3] = f64::NAN;
+        }
+        if rand() > 0.9 {
+            features[i * d] = f64::NAN;
+        }
     }
 
     let mut cfg = Config::default();
@@ -39,7 +43,8 @@ fn main() {
     cfg.learning_rate = 0.1;
     cfg.seed = 0;
 
-    let ds = DatasetBuilder::from_rows(&features, n, d, &labels, &cfg).unwrap();
+    let schema = nanogbm::feature::Schema::all_numerical(d);
+    let ds = DatasetBuilder::from_rows(&features, n, &schema, &labels, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
 
     let split = model.feature_importance_split();

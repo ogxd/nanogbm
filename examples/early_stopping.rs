@@ -3,9 +3,9 @@
 //!
 //! Run with: `cargo run --release --example early_stopping`
 
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 use nanogbm::metric::{BinaryLogloss, Metric};
 use nanogbm::predict::predict_raw_scores;
+use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn make_data(n: usize, d: usize, seed: u64) -> (Vec<f64>, Vec<f32>) {
     let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
@@ -47,8 +47,9 @@ fn main() {
     cfg.verbose = true;
     cfg.seed = 0;
 
-    let train = DatasetBuilder::from_rows(&tx, 3000, d, &ty, &cfg).unwrap();
-    let valid = DatasetBuilder::from_rows(&vx, 1000, d, &vy, &cfg).unwrap();
+    let schema = nanogbm::feature::Schema::all_numerical(d);
+    let train = DatasetBuilder::from_rows(&tx, 3000, &schema, &ty, &cfg).unwrap();
+    let valid = DatasetBuilder::from_rows(&vx, 1000, &schema, &vy, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, Some(&valid)).unwrap();
 
     let scores = predict_raw_scores(&model, &vx, 1000, d);

@@ -5,6 +5,7 @@ use std::path::Path;
 use bincode::config::standard;
 use serde::{Deserialize, Serialize};
 
+use crate::dataset::BinMapper;
 use crate::error::{Error, Result};
 use crate::tree::Tree;
 
@@ -15,13 +16,18 @@ pub struct Model {
     pub learning_rate: f64,
     pub n_features: usize,
     pub trees: Vec<Tree>,
+    /// Per-feature bin mapper, needed for routing raw-value categorical splits.
+    /// `#[serde(default)]` keeps backward compatibility with pre-categorical models.
+    #[serde(default)]
+    pub bin_mappers: Vec<BinMapper>,
 }
 
 impl Model {
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let f = File::create(path)?;
         let mut w = BufWriter::new(f);
-        let bytes = bincode::serde::encode_to_vec(self, standard()).map_err(|e| Error::Serde(e.to_string()))?;
+        let bytes = bincode::serde::encode_to_vec(self, standard())
+            .map_err(|e| Error::Serde(e.to_string()))?;
         w.write_all(&bytes)?;
         w.flush()?;
         Ok(())
@@ -32,7 +38,8 @@ impl Model {
         let mut r = BufReader::new(f);
         let mut buf = Vec::new();
         r.read_to_end(&mut buf)?;
-        let (model, _) = bincode::serde::decode_from_slice::<Model, _>(&buf, standard()).map_err(|e| Error::Serde(e.to_string()))?;
+        let (model, _) = bincode::serde::decode_from_slice::<Model, _>(&buf, standard())
+            .map_err(|e| Error::Serde(e.to_string()))?;
         Ok(model)
     }
 

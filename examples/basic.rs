@@ -2,8 +2,8 @@
 //!
 //! Run with: `cargo run --release --example basic`
 
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 use nanogbm::predict::predict_proba;
+use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn main() {
     // 1000 rows, 5 features. Label is 1 when feature[0] + feature[1] > 0.
@@ -32,7 +32,8 @@ fn main() {
     cfg.num_leaves = 15;
     cfg.seed = 0;
 
-    let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg).unwrap();
+    let schema = nanogbm::feature::Schema::all_numerical(n_features);
+    let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, None).unwrap();
 
     let probs = predict_proba(&model, &features[..10 * n_features], 10, n_features);

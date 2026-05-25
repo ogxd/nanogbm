@@ -36,12 +36,38 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn len(&self) -> usize { self.columns.len() }
-    pub fn is_empty(&self) -> bool { self.columns.is_empty() }
-    pub fn columns(&self) -> &[Column] { &self.columns }
-    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ { self.columns.iter().map(|c| c.name) }
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.columns.iter().map(|c| c.name)
+    }
     pub fn categorical_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.columns.iter().enumerate().filter_map(|(i, c)| (c.kind == ColumnKind::Categorical).then_some(i))
+    }
+    pub fn is_categorical(&self, i: usize) -> bool {
+        matches!(self.columns.get(i).map(|c| c.kind), Some(ColumnKind::Categorical))
+    }
+
+    /// Build a schema of `n` anonymous numerical columns. For callers that don't
+    /// route their features through a [`FeatureSink`] (e.g. raw test fixtures).
+    pub fn all_numerical(n: usize) -> Self {
+        Self { columns: (0..n).map(|_| Column { name: "feature", kind: ColumnKind::Numeric }).collect() }
+    }
+
+    /// Build a schema of `n` anonymous columns, marking `cat_indices` as categorical.
+    pub fn with_categorical_at(n: usize, cat_indices: &[usize]) -> Self {
+        let cat_set: std::collections::HashSet<usize> = cat_indices.iter().copied().collect();
+        let columns = (0..n)
+            .map(|i| Column { name: "feature", kind: if cat_set.contains(&i) { ColumnKind::Categorical } else { ColumnKind::Numeric } })
+            .collect();
+        Self { columns }
     }
 
     /// Format a per-feature importance report as a sortable table.
@@ -50,16 +76,67 @@ impl Schema {
     pub fn format_importance(&self, splits: &[u32], gains: &[f64]) -> String {
         let total_gain: f64 = gains.iter().sum();
         let total_splits: u32 = splits.iter().sum();
-        let name_w = self.columns.iter().map(|c| c.name.len()).max().unwrap_or(4).max(7);
-        let mut rows: Vec<(usize, &Column, u32, f64)> = self.columns.iter().enumerate().map(|(i, c)| (i, c, *splits.get(i).unwrap_or(&0), *gains.get(i).unwrap_or(&0.0))).collect();
+        let name_w = self
+            .columns
+            .iter()
+            .map(|c| c.name.len())
+            .max()
+            .unwrap_or(4)
+            .max(7);
+        let mut rows: Vec<(usize, &Column, u32, f64)> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    i,
+                    c,
+                    *splits.get(i).unwrap_or(&0),
+                    *gains.get(i).unwrap_or(&0.0),
+                )
+            })
+            .collect();
         rows.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
         let mut out = String::new();
-        out.push_str(&format!("{:<idx$}  {:<name_w$}  {:<5}  {:>7}  {:>9}  {:>6}  {:>6}\n", "idx", "feature", "kind", "splits", "gain", "split%", "gain%", idx = 4, name_w = name_w));
+        out.push_str(&format!(
+            "{:<idx$}  {:<name_w$}  {:<5}  {:>7}  {:>9}  {:>6}  {:>6}\n",
+            "idx",
+            "feature",
+            "kind",
+            "splits",
+            "gain",
+            "split%",
+            "gain%",
+            idx = 4,
+            name_w = name_w
+        ));
         for (i, c, sp, g) in &rows {
-            let kind = match c.kind { ColumnKind::Numeric => "num", ColumnKind::Categorical => "cat" };
-            let sp_pct = if total_splits > 0 { 100.0 * *sp as f64 / total_splits as f64 } else { 0.0 };
-            let g_pct = if total_gain > 0.0 { 100.0 * *g / total_gain } else { 0.0 };
-            out.push_str(&format!("{:<idx$}  {:<name_w$}  {:<5}  {:>7}  {:>9.3}  {:>5.1}%  {:>5.1}%\n", i, c.name, kind, sp, g, sp_pct, g_pct, idx = 4, name_w = name_w));
+            let kind = match c.kind {
+                ColumnKind::Numeric => "num",
+                ColumnKind::Categorical => "cat",
+            };
+            let sp_pct = if total_splits > 0 {
+                100.0 * *sp as f64 / total_splits as f64
+            } else {
+                0.0
+            };
+            let g_pct = if total_gain > 0.0 {
+                100.0 * *g / total_gain
+            } else {
+                0.0
+            };
+            out.push_str(&format!(
+                "{:<idx$}  {:<name_w$}  {:<5}  {:>7}  {:>9.3}  {:>5.1}%  {:>5.1}%\n",
+                i,
+                c.name,
+                kind,
+                sp,
+                g,
+                sp_pct,
+                g_pct,
+                idx = 4,
+                name_w = name_w
+            ));
         }
         out
     }
@@ -72,7 +149,13 @@ pub trait FeatureSink {
     fn bool(&mut self, name: &'static str, v: bool);
     fn cat(&mut self, name: &'static str, v: i32);
     fn cat_hashed<H: Hash>(&mut self, name: &'static str, buckets: u32, v: &H);
-    fn multi_hot<I: IntoIterator<Item = i32>>(&mut self, name: &'static str, min: i32, max: i32, values: I);
+    fn multi_hot<I: IntoIterator<Item = i32>>(
+        &mut self,
+        name: &'static str,
+        min: i32,
+        max: i32,
+        values: I,
+    );
 }
 
 #[derive(Debug, Default)]
@@ -81,21 +164,41 @@ pub struct DiscoverySink {
 }
 
 impl DiscoverySink {
-    pub fn new() -> Self { Self::default() }
-    pub fn into_schema(self) -> Schema { self.schema }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn into_schema(self) -> Schema {
+        self.schema
+    }
     fn push(&mut self, name: &'static str, kind: ColumnKind) {
         self.schema.columns.push(Column { name, kind });
     }
 }
 
 impl FeatureSink for DiscoverySink {
-    fn num(&mut self, name: &'static str, _v: f64) { self.push(name, ColumnKind::Numeric); }
-    fn bool(&mut self, name: &'static str, _v: bool) { self.push(name, ColumnKind::Numeric); }
-    fn cat(&mut self, name: &'static str, _v: i32) { self.push(name, ColumnKind::Categorical); }
-    fn cat_hashed<H: Hash>(&mut self, name: &'static str, _buckets: u32, _v: &H) { self.push(name, ColumnKind::Categorical); }
-    fn multi_hot<I: IntoIterator<Item = i32>>(&mut self, name: &'static str, min: i32, max: i32, _values: I) {
+    fn num(&mut self, name: &'static str, _v: f64) {
+        self.push(name, ColumnKind::Numeric);
+    }
+    fn bool(&mut self, name: &'static str, _v: bool) {
+        self.push(name, ColumnKind::Numeric);
+    }
+    fn cat(&mut self, name: &'static str, _v: i32) {
+        self.push(name, ColumnKind::Categorical);
+    }
+    fn cat_hashed<H: Hash>(&mut self, name: &'static str, _buckets: u32, _v: &H) {
+        self.push(name, ColumnKind::Categorical);
+    }
+    fn multi_hot<I: IntoIterator<Item = i32>>(
+        &mut self,
+        name: &'static str,
+        min: i32,
+        max: i32,
+        _values: I,
+    ) {
         let n = (max - min + 1).max(1) as usize;
-        for _ in 0..n { self.push(name, ColumnKind::Numeric); }
+        for _ in 0..n {
+            self.push(name, ColumnKind::Numeric);
+        }
     }
 }
 
@@ -105,8 +208,12 @@ pub struct SliceSink<'a> {
 }
 
 impl<'a> SliceSink<'a> {
-    pub fn new(out: &'a mut [f64]) -> Self { Self { out, i: 0 } }
-    pub fn position(&self) -> usize { self.i }
+    pub fn new(out: &'a mut [f64]) -> Self {
+        Self { out, i: 0 }
+    }
+    pub fn position(&self) -> usize {
+        self.i
+    }
 
     #[inline]
     fn write(&mut self, v: f64) {
@@ -116,17 +223,39 @@ impl<'a> SliceSink<'a> {
 }
 
 impl<'a> FeatureSink for SliceSink<'a> {
-    #[inline] fn num(&mut self, _name: &'static str, v: f64) { self.write(v); }
-    #[inline] fn bool(&mut self, _name: &'static str, v: bool) { self.write(if v { 1.0 } else { 0.0 }); }
-    #[inline] fn cat(&mut self, _name: &'static str, v: i32) { self.write(v as f64); }
-    #[inline] fn cat_hashed<H: Hash>(&mut self, _name: &'static str, buckets: u32, v: &H) { self.write(hash_to_bucket(v, buckets) as f64); }
     #[inline]
-    fn multi_hot<I: IntoIterator<Item = i32>>(&mut self, _name: &'static str, min: i32, max: i32, values: I) {
+    fn num(&mut self, _name: &'static str, v: f64) {
+        self.write(v);
+    }
+    #[inline]
+    fn bool(&mut self, _name: &'static str, v: bool) {
+        self.write(if v { 1.0 } else { 0.0 });
+    }
+    #[inline]
+    fn cat(&mut self, _name: &'static str, v: i32) {
+        self.write(v as f64);
+    }
+    #[inline]
+    fn cat_hashed<H: Hash>(&mut self, _name: &'static str, buckets: u32, v: &H) {
+        self.write(hash_to_bucket(v, buckets) as f64);
+    }
+    #[inline]
+    fn multi_hot<I: IntoIterator<Item = i32>>(
+        &mut self,
+        _name: &'static str,
+        min: i32,
+        max: i32,
+        values: I,
+    ) {
         let n = (max - min + 1).max(1) as usize;
         let start = self.i;
-        for k in 0..n { self.out[start + k] = 0.0; }
+        for k in 0..n {
+            self.out[start + k] = 0.0;
+        }
         for v in values {
-            if v < min || v > max { continue; }
+            if v < min || v > max {
+                continue;
+            }
             self.out[start + (v - min) as usize] = 1.0;
         }
         self.i += n;
@@ -152,10 +281,18 @@ mod tests {
         let schema = d.into_schema();
         assert_eq!(schema.len(), 7); // 1+1+1+1+3
         let kinds: Vec<_> = schema.columns().iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, vec![
-            ColumnKind::Numeric, ColumnKind::Numeric, ColumnKind::Categorical, ColumnKind::Categorical,
-            ColumnKind::Numeric, ColumnKind::Numeric, ColumnKind::Numeric,
-        ]);
+        assert_eq!(
+            kinds,
+            vec![
+                ColumnKind::Numeric,
+                ColumnKind::Numeric,
+                ColumnKind::Categorical,
+                ColumnKind::Categorical,
+                ColumnKind::Numeric,
+                ColumnKind::Numeric,
+                ColumnKind::Numeric,
+            ]
+        );
         let cats: Vec<_> = schema.categorical_indices().collect();
         assert_eq!(cats, vec![2, 3]);
     }
@@ -182,6 +319,9 @@ mod tests {
     #[test]
     fn hash_is_deterministic() {
         assert_eq!(hash_to_bucket(&"x", 1024), hash_to_bucket(&"x", 1024));
-        assert_eq!(hash_to_bucket(&(7u32, 12i32), 1024), hash_to_bucket(&(7u32, 12i32), 1024));
+        assert_eq!(
+            hash_to_bucket(&(7u32, 12i32), 1024),
+            hash_to_bucket(&(7u32, 12i32), 1024)
+        );
     }
 }

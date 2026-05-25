@@ -22,6 +22,37 @@ pub struct Config {
     pub early_stopping_round: usize,
     pub seed: u64,
     pub verbose: bool,
+    /// Distinct values per categorical column; excess values collapse to MISSING.
+    #[serde(default = "default_max_cat_bin")]
+    pub max_cat_bin: usize,
+    /// Smoothing in the sort key grad/(hess + cat_smooth) for categorical scanning.
+    #[serde(default = "default_cat_smooth")]
+    pub cat_smooth: f64,
+    /// Additional L2 used during categorical split gain.
+    #[serde(default = "default_cat_l2")]
+    pub cat_l2: f64,
+    /// Cap on the number of bins on the "left" side of a categorical subset split.
+    #[serde(default = "default_max_cat_threshold")]
+    pub max_cat_threshold: usize,
+    /// Multiplier applied to gradient and hessian for positive (y >= 0.5) samples.
+    #[serde(default = "default_pos_weight")]
+    pub pos_weight: f64,
+}
+
+fn default_max_cat_bin() -> usize {
+    1024
+}
+fn default_cat_smooth() -> f64 {
+    10.0
+}
+fn default_cat_l2() -> f64 {
+    10.0
+}
+fn default_max_cat_threshold() -> usize {
+    32
+}
+fn default_pos_weight() -> f64 {
+    1.0
 }
 
 impl Default for Config {
@@ -44,6 +75,11 @@ impl Default for Config {
             early_stopping_round: 0,
             seed: 0,
             verbose: false,
+            max_cat_bin: default_max_cat_bin(),
+            cat_smooth: default_cat_smooth(),
+            cat_l2: default_cat_l2(),
+            max_cat_threshold: default_max_cat_threshold(),
+            pos_weight: default_pos_weight(),
         }
     }
 }
@@ -64,6 +100,21 @@ impl Config {
         }
         if !(0.0 < self.bagging_fraction && self.bagging_fraction <= 1.0) {
             return Err(Error::Config("bagging_fraction must be in (0, 1]".into()));
+        }
+        if self.max_cat_bin < 2 {
+            return Err(Error::Config("max_cat_bin must be >= 2".into()));
+        }
+        if self.cat_smooth < 0.0 {
+            return Err(Error::Config("cat_smooth must be >= 0".into()));
+        }
+        if self.cat_l2 < 0.0 {
+            return Err(Error::Config("cat_l2 must be >= 0".into()));
+        }
+        if self.max_cat_threshold < 1 {
+            return Err(Error::Config("max_cat_threshold must be >= 1".into()));
+        }
+        if self.pos_weight <= 0.0 || self.pos_weight.is_nan() {
+            return Err(Error::Config("pos_weight must be > 0".into()));
         }
         Ok(())
     }

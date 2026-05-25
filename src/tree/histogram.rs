@@ -80,7 +80,11 @@ impl FeatureHistogram {
     }
 
     /// Compute `self = parent - sibling` (parent-minus-sibling histogram trick).
-    pub fn subtract_into(parent: &FeatureHistogram, sibling: &FeatureHistogram, out: &mut FeatureHistogram) {
+    pub fn subtract_into(
+        parent: &FeatureHistogram,
+        sibling: &FeatureHistogram,
+        out: &mut FeatureHistogram,
+    ) {
         debug_assert_eq!(parent.num_bins(), sibling.num_bins());
         debug_assert_eq!(parent.num_bins(), out.num_bins());
         for i in 0..parent.num_bins() {

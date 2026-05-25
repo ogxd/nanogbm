@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::dataset::Dataset;
-use crate::tree::histogram::{FeatureHistogram, build_histograms_batched, build_histograms_batched_full};
+use crate::tree::histogram::{
+    FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
+};
 use crate::tree::split::{SplitInfo, find_best_split_for_feature, threshold_leaf};
-use crate::tree::{MissingDir, SplitNode, Tree};
+use crate::tree::{SplitKind, SplitNode, Tree};
 
 /// Cumulative per-phase wall-clock counters (one global instance, set from
 /// gbdt.rs at end of fit). Cells because all training is single-threaded.
@@ -20,7 +22,9 @@ pub struct TimingBuckets {
 }
 
 impl TimingBuckets {
-    fn add(cell: &Cell<Duration>, d: Duration) { cell.set(cell.get() + d); }
+    fn add(cell: &Cell<Duration>, d: Duration) {
+        cell.set(cell.get() + d);
+    }
 }
 
 /// Encode a leaf index `idx` (>= 0) as a negative child pointer.
@@ -51,7 +55,11 @@ pub struct TreeLearner<'a> {
 
 impl<'a> TreeLearner<'a> {
     pub fn new(config: &'a Config, dataset: &'a Dataset, timing: &'a TimingBuckets) -> Self {
-        Self { config, dataset, timing }
+        Self {
+            config,
+            dataset,
+            timing,
+        }
     }
 
     /// Grow a single tree on the provided sample of rows and features.
@@ -111,13 +119,20 @@ impl<'a> TreeLearner<'a> {
         }
         TimingBuckets::add(&self.timing.hist_build, t0.elapsed());
 
-        let root_grad: f64 = row_indices.iter().map(|&i| gradhess[i as usize][0] as f64).sum();
-        let root_hess: f64 = row_indices.iter().map(|&i| gradhess[i as usize][1] as f64).sum();
+        let root_grad: f64 = row_indices
+            .iter()
+            .map(|&i| gradhess[i as usize][0] as f64)
+            .sum();
+        let root_hess: f64 = row_indices
+            .iter()
+            .map(|&i| gradhess[i as usize][1] as f64)
+            .sum();
         let root_count = row_indices.len() as u32;
 
         // Allocate root leaf in tree.leaf_values; its value is set now and overwritten
         // if/when it gets split (leaving a dead entry, which is fine).
-        tree.leaf_values.push(self.compute_leaf_value(root_grad, root_hess));
+        tree.leaf_values
+            .push(self.compute_leaf_value(root_grad, root_hess));
 
         let mut leaves: Vec<LeafState> = vec![LeafState {
             indices: row_indices.to_vec(),
@@ -156,8 +171,34 @@ impl<'a> TreeLearner<'a> {
             let n_parent = parent.indices.len();
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
-            let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
-            let threshold_bin = split.threshold_bin;
+            let num_bins = self.dataset.bin_mapper(split.feature).num_bins();
+            // `go_left_for_bin[bin]` is the partition decision for that bin code;
+            // precomputed once so the unsafe hot loop is a simple table lookup.
+            let mut go_left_for_bin: Vec<bool> = vec![false; num_bins];
+            match &split.kind {
+                SplitKind::Numerical {
+                    threshold_bin,
+                    missing_dir,
+                    ..
+                } => {
+                    let tb = *threshold_bin as usize;
+                    for (b, slot) in go_left_for_bin.iter_mut().enumerate() {
+                        *slot = if b == crate::dataset::MISSING_BIN as usize {
+                            matches!(missing_dir, crate::tree::MissingDir::Left)
+                        } else {
+                            b <= tb
+                        };
+                    }
+                }
+                SplitKind::Categorical { left_bins } => {
+                    for &b in left_bins {
+                        if (b as usize) < num_bins {
+                            go_left_for_bin[b as usize] = true;
+                        }
+                    }
+                    // MISSING (bin 0) stays false: missing always goes right for categorical splits.
+                }
+            }
             unsafe {
                 let lp = left_indices.as_mut_ptr();
                 let rp = right_indices.as_mut_ptr();
@@ -165,14 +206,11 @@ impl<'a> TreeLearner<'a> {
                 let mut ri: usize = 0;
                 let parent_ptr = parent.indices.as_ptr();
                 let col_ptr = feat_col.as_ptr();
+                let go_ptr = go_left_for_bin.as_ptr();
                 for k in 0..n_parent {
                     let i = *parent_ptr.add(k);
-                    let bin = *col_ptr.add(i as usize);
-                    let goes_left = if bin == crate::dataset::MISSING_BIN {
-                        missing_goes_left
-                    } else {
-                        bin <= threshold_bin
-                    };
+                    let bin = *col_ptr.add(i as usize) as usize;
+                    let goes_left = *go_ptr.add(bin);
                     if goes_left {
                         *lp.add(li) = i;
                         li += 1;
@@ -188,9 +226,11 @@ impl<'a> TreeLearner<'a> {
 
             // Allocate two new leaf slots.
             let left_leaf_idx = tree.leaf_values.len();
-            tree.leaf_values.push(self.compute_leaf_value(split.left_sum_grad, split.left_sum_hess));
+            tree.leaf_values
+                .push(self.compute_leaf_value(split.left_sum_grad, split.left_sum_hess));
             let right_leaf_idx = tree.leaf_values.len();
-            tree.leaf_values.push(self.compute_leaf_value(split.right_sum_grad, split.right_sum_hess));
+            tree.leaf_values
+                .push(self.compute_leaf_value(split.right_sum_grad, split.right_sum_hess));
 
             // Update per-row leaf assignment for the rows we just partitioned.
             for &i in &left_indices {
@@ -204,9 +244,7 @@ impl<'a> TreeLearner<'a> {
             let new_node_idx = tree.nodes.len() as i32;
             tree.nodes.push(SplitNode {
                 feature: split.feature as u32,
-                threshold: split.threshold_value,
-                threshold_bin: split.threshold_bin,
-                missing_dir: split.missing_dir,
+                kind: split.kind.clone(),
                 left_child: encode_leaf(left_leaf_idx),
                 right_child: encode_leaf(right_leaf_idx),
                 gain: split.gain,
@@ -225,7 +263,11 @@ impl<'a> TreeLearner<'a> {
             // Decide which child to build histograms for directly (the smaller one)
             // and derive the other by subtraction from the parent's histograms.
             let build_left_first = left_indices.len() <= right_indices.len();
-            let small_indices: &Vec<u32> = if build_left_first { &left_indices } else { &right_indices };
+            let small_indices: &Vec<u32> = if build_left_first {
+                &left_indices
+            } else {
+                &right_indices
+            };
 
             let t_h = std::time::Instant::now();
             let mut small_hists: Vec<FeatureHistogram> = feature_indices
@@ -247,11 +289,19 @@ impl<'a> TreeLearner<'a> {
                 .map(|(slot, _)| FeatureHistogram::zeros(parent.histograms[slot].num_bins()))
                 .collect();
             for slot in 0..feature_indices.len() {
-                FeatureHistogram::subtract_into(&parent.histograms[slot], &small_hists[slot], &mut large_hists[slot]);
+                FeatureHistogram::subtract_into(
+                    &parent.histograms[slot],
+                    &small_hists[slot],
+                    &mut large_hists[slot],
+                );
             }
             TimingBuckets::add(&self.timing.hist_subtract, t_s.elapsed());
 
-            let (left_hists, right_hists) = if build_left_first { (small_hists, large_hists) } else { (large_hists, small_hists) };
+            let (left_hists, right_hists) = if build_left_first {
+                (small_hists, large_hists)
+            } else {
+                (large_hists, small_hists)
+            };
 
             let mut left_leaf = LeafState {
                 indices: left_indices,
@@ -315,15 +365,26 @@ impl<'a> TreeLearner<'a> {
                     self.config,
                 )
             })
-            .fold(SplitInfo::dummy_worst(), |a, b| if a.gain >= b.gain { a } else { b });
+            .fold(SplitInfo::dummy_worst(), |a, b| {
+                if a.gain >= b.gain { a } else { b }
+            });
 
-        leaf.best_split = if best.gain > f64::NEG_INFINITY { Some(best) } else { None };
+        leaf.best_split = if best.gain > f64::NEG_INFINITY {
+            Some(best)
+        } else {
+            None
+        };
         TimingBuckets::add(&self.timing.split_search, t.elapsed());
     }
 
     #[inline]
     fn compute_leaf_value(&self, sum_grad: f64, sum_hess: f64) -> f64 {
-        threshold_leaf(sum_grad, sum_hess, self.config.lambda_l1, self.config.lambda_l2)
+        threshold_leaf(
+            sum_grad,
+            sum_hess,
+            self.config.lambda_l1,
+            self.config.lambda_l2,
+        )
     }
 }
 
@@ -331,9 +392,11 @@ impl SplitInfo {
     fn dummy_worst() -> Self {
         Self {
             feature: 0,
-            threshold_bin: 0,
-            threshold_value: 0.0,
-            missing_dir: MissingDir::Left,
+            kind: SplitKind::Numerical {
+                threshold_bin: 0,
+                threshold_value: 0.0,
+                missing_dir: crate::tree::MissingDir::Left,
+            },
             gain: f64::NEG_INFINITY,
             left_sum_grad: 0.0,
             left_sum_hess: 0.0,

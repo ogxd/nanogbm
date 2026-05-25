@@ -24,7 +24,7 @@ impl<'a> GbdtTrainer<'a> {
     /// each iteration and apply early stopping (if configured).
     pub fn fit(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
         self.config.validate()?;
-        let objective = BinaryObjective::default();
+        let objective = BinaryObjective::with_pos_weight(self.config.pos_weight);
         let metric = BinaryLogloss;
 
         let n = train.n_rows();
@@ -59,11 +59,15 @@ impl<'a> GbdtTrainer<'a> {
             t_gradients += t0.elapsed();
 
             // Row bagging.
-            let row_indices: Vec<u32> = if self.config.bagging_fraction < 1.0 && self.config.bagging_freq > 0 {
+            let row_indices: Vec<u32> = if self.config.bagging_fraction < 1.0
+                && self.config.bagging_freq > 0
+            {
                 if iter % self.config.bagging_freq == 0 {
                     bagged_rows = Some(sample_indices(n, self.config.bagging_fraction, &mut rng));
                 }
-                bagged_rows.clone().unwrap_or_else(|| (0..n as u32).collect())
+                bagged_rows
+                    .clone()
+                    .unwrap_or_else(|| (0..n as u32).collect())
             } else {
                 (0..n as u32).collect()
             };
@@ -82,7 +86,8 @@ impl<'a> GbdtTrainer<'a> {
 
             let t1 = std::time::Instant::now();
             let learner = TreeLearner::new(self.config, train, &timing);
-            let (tree, row_to_leaf) = learner.train_one_tree(&gradhess, &row_indices, &feature_indices);
+            let (tree, row_to_leaf) =
+                learner.train_one_tree(&gradhess, &row_indices, &feature_indices);
             t_tree += t1.elapsed();
 
             // Update raw_scores using the leaf assignment recorded during tree
@@ -115,7 +120,9 @@ impl<'a> GbdtTrainer<'a> {
                     rounds_no_improve += 1;
                 }
                 trees.push(tree);
-                if self.config.early_stopping_round > 0 && rounds_no_improve >= self.config.early_stopping_round {
+                if self.config.early_stopping_round > 0
+                    && rounds_no_improve >= self.config.early_stopping_round
+                {
                     // Truncate to best_iter + 1 trees.
                     trees.truncate(best_iter + 1);
                     break;
@@ -123,7 +130,12 @@ impl<'a> GbdtTrainer<'a> {
             } else {
                 if self.config.verbose {
                     let train_score = metric.evaluate(&raw_scores, train.labels());
-                    eprintln!("[{}] train {} = {:.6}", iter + 1, metric.name(), train_score);
+                    eprintln!(
+                        "[{}] train {} = {:.6}",
+                        iter + 1,
+                        metric.name(),
+                        train_score
+                    );
                 }
                 trees.push(tree);
             }
@@ -132,7 +144,8 @@ impl<'a> GbdtTrainer<'a> {
         if self.config.verbose {
             eprintln!(
                 "[nanogbm] fit timing: gradients={:.2}s, tree_build={:.2}s (hist_build={:.2}s, hist_subtract={:.2}s, split_search={:.2}s, partition={:.2}s), update_scores={:.2}s",
-                t_gradients.as_secs_f32(), t_tree.as_secs_f32(),
+                t_gradients.as_secs_f32(),
+                t_tree.as_secs_f32(),
                 timing.hist_build.get().as_secs_f32(),
                 timing.hist_subtract.get().as_secs_f32(),
                 timing.split_search.get().as_secs_f32(),
@@ -146,6 +159,7 @@ impl<'a> GbdtTrainer<'a> {
             learning_rate: self.config.learning_rate,
             n_features,
             trees,
+            bin_mappers: train.bin_mappers().to_vec(),
         })
     }
 }
