@@ -1,4 +1,44 @@
-//! nanogbm: a pure-Rust gradient boosting library (GBDT, binary classification, CPU only).
+//! A small, pure-Rust gradient boosting library with a deliberately narrow
+//! scope: **GBDT only, binary classification only, CPU only, dense numerical
+//! features**. No DART/GOSS/RF, no multiclass, no ranking, no regression, no
+//! sparse inputs, no GPU, no FFI bindings.
+//!
+//! # Quickstart
+//!
+//! ```no_run
+//! use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+//! use nanogbm::feature::Schema;
+//! use nanogbm::predict::predict_proba;
+//!
+//! # let n_rows = 1000usize;
+//! # let n_features = 5usize;
+//! # let features: Vec<f64> = vec![0.0; n_rows * n_features];
+//! # let labels: Vec<f32> = vec![0.0; n_rows];
+//! let cfg = Config {
+//!     num_iterations: 100,
+//!     learning_rate: 0.1,
+//!     num_leaves: 31,
+//!     ..Config::default()
+//! };
+//!
+//! let schema = Schema::all_numerical(n_features);
+//! let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg)?;
+//! let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
+//! let probs = predict_proba(&model, &features, n_rows, n_features);
+//! # Ok::<(), nanogbm::Error>(())
+//! ```
+//!
+//! # Highlights
+//!
+//! - Histogram learner with sibling-by-subtraction.
+//! - Missing values handled at the split (NaN bucket, per-node direction by gain).
+//! - Early stopping truncates the model to the best iteration.
+//! - Deterministic: same [`Config`] + same data → byte-identical model. All
+//!   randomness flows through a single `ChaCha8Rng` seeded from
+//!   [`Config::seed`].
+//! - Bincode v2 + serde serialization of [`Model`].
+//!
+//! See the `examples/` directory for runnable end-to-end programs.
 
 pub mod boosting;
 pub mod config;
