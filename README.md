@@ -105,7 +105,7 @@ cargo test --release
 cargo test --release --test e2e
 ```
 
-The integration suite (`nanogbm/tests/e2e.rs`) protects three things and you
+The integration suite (`tests/e2e.rs`) protects three things and you
 should care about all of them:
 
 1. **Convergence** on a synthetic problem — if it can't fit easy data, it
