@@ -92,8 +92,8 @@ impl Model {
     pub fn feature_importance_gain(&self) -> Vec<f64> {
         let mut gains = vec![0.0f64; self.n_features];
         for tree in &self.trees {
-            for node in &tree.nodes {
-                gains[node.feature as usize] += node.gain;
+            for (node, gain) in tree.nodes.iter().zip(tree.node_gains.iter()) {
+                gains[node.feature as usize] += gain;
             }
         }
         gains
@@ -137,15 +137,46 @@ impl Model {
     /// Predict raw additive scores against an already-binned dataset. Use this
     /// for fast inference paths where you can afford to bin once and predict
     /// many times.
+    ///
+    /// Dispatches once on the dataset's bin width and pre-collects column
+    /// slices, then walks each tree on each row using a type-stable inner
+    /// loop ([`crate::tree::Tree::predict_on_columns`]). Avoids the per-node
+    /// `BinData::U8/U16` match that [`crate::tree::Tree::predict_on_dataset`]
+    /// otherwise incurs.
     pub fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let n = dataset.n_rows();
         let mut scores = vec![self.init_score; n];
-        for tree in &self.trees {
-            for (row, s) in scores.iter_mut().enumerate() {
-                *s += self.learning_rate * tree.predict_on_dataset(dataset, row);
+        match dataset.bin_width() {
+            crate::dataset::BinWidth::U8 => {
+                let cols: Vec<&[u8]> = (0..dataset.n_features())
+                    .map(|f| dataset.feature_column_u8(f))
+                    .collect();
+                self.predict_into_with_columns(&cols, n, &mut scores);
+            }
+            crate::dataset::BinWidth::U16 => {
+                let cols: Vec<&[u16]> = (0..dataset.n_features())
+                    .map(|f| dataset.feature_column_u16(f))
+                    .collect();
+                self.predict_into_with_columns(&cols, n, &mut scores);
             }
         }
         scores
+    }
+
+    /// Tree-outer / row-inner accumulation onto `scores`. The tree-outer
+    /// order keeps the current tree's nodes hot in L1 across the full
+    /// row sweep.
+    fn predict_into_with_columns<B: Bin>(
+        &self,
+        columns: &[&[B]],
+        n_rows: usize,
+        scores: &mut [f64],
+    ) {
+        for tree in &self.trees {
+            for row in 0..n_rows {
+                scores[row] += self.learning_rate * tree.predict_on_columns(columns, row);
+            }
+        }
     }
 
     /// Predict probabilities against an already-binned dataset.

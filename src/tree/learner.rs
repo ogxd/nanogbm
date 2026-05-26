@@ -80,6 +80,8 @@ impl<'a> TreeLearner<'a> {
     ) -> (Tree, Vec<u32>) {
         let mut tree = Tree {
             nodes: Vec::new(),
+            node_thresholds: Vec::new(),
+            node_gains: Vec::new(),
             leaf_values: Vec::new(),
         };
 
@@ -232,17 +234,19 @@ impl<'a> TreeLearner<'a> {
                 row_to_leaf[i as usize] = right_leaf_idx as u32;
             }
 
-            // Append the new internal node.
+            // Append the new internal node. Threshold and gain go into the
+            // parallel `node_thresholds` / `node_gains` arrays so they stay
+            // out of the inference-hot `SplitNode` layout.
             let new_node_idx = tree.nodes.len() as i32;
             tree.nodes.push(SplitNode {
                 feature: split.feature as u32,
-                threshold: split.threshold_value,
                 threshold_bin: split.threshold_bin,
                 missing_dir: split.missing_dir,
                 left_child: encode_leaf(left_leaf_idx),
                 right_child: encode_leaf(right_leaf_idx),
-                gain: split.gain,
             });
+            tree.node_thresholds.push(split.threshold_value);
+            tree.node_gains.push(split.gain);
 
             // Wire up the parent (if any) to point to this new internal node.
             if parent.parent_node_idx >= 0 {
