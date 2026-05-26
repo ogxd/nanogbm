@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`nanogbm` is a pure-Rust gradient boosting library, deliberately scoped to a narrow subset: **GBDT boosting only**, **binary logistic objective only**, **binary_logloss metric only**, CPU only, dense numerical and **native categorical features** with missing-value handling. No DART/GOSS/RF, no sparse input, no GPU, no FFI. Keep changes within this scope unless explicitly asked to expand it.
+`nanogbm` is a pure-Rust gradient boosting library, deliberately scoped to a narrow subset: **GBDT boosting only**, **binary logistic objective only**, **binary_logloss metric only**, CPU only, dense numerical features with missing-value handling. No DART/GOSS/RF, no categorical features, no sparse input, no GPU, no FFI. Keep changes within this scope unless explicitly asked to expand it.
 
 The library crate and the workspace are both called `nanogbm`.
 
@@ -36,7 +36,7 @@ The model is just **a list of small decision trees**. To predict, you walk every
 
 The rest is performance tricks. End-to-end flow of one `GbdtTrainer::fit` call:
 
-1. **Bucket all feature values once, up front** (`dataset::bin_mapper`, `dataset::builder`). Real-valued columns are slow to split on — you'd have to consider every distinct value as a possible split point. So before training, each feature column is bucketed into at most ~255 buckets using quantiles, and the raw `f64` is replaced by a small `u16` bucket id. From here on the trees only ever look at bucket ids. Bucket **0 is reserved for "missing" (NaN)**. Columns marked categorical in the `Schema` (via `Schema::with_categorical_at` or by going through `DiscoverySink` with `cat`/`cat_hashed`) are bucketed differently: distinct integer values (cast from `f64 as i64`) become their own bins, capped at `max_cat_bin` (low-frequency values collapse to MISSING). The mapping (`BinMapper`) is fit on training data and **reused as-is** for validation and inference via `DatasetBuilder::from_rows_with_mappers` / `from_columns_with_mappers` — never refit it. The `Dataset` is stored **column-major** because every hot loop iterates one feature across many rows.
+1. **Bucket all feature values once, up front** (`dataset::bin_mapper`, `dataset::builder`). Real-valued columns are slow to split on — you'd have to consider every distinct value as a possible split point. So before training, each feature column is bucketed into at most ~255 buckets using quantiles, and the raw `f64` is replaced by a small `u16` bucket id. From here on the trees only ever look at bucket ids. Bucket **0 is reserved for "missing" (NaN)**. The mapping (`BinMapper`) is fit on training data and **reused as-is** for validation and inference — never refit it. The `Dataset` is stored **column-major** because every hot loop iterates one feature across many rows.
 
 2. **Outer loop: build trees one at a time** (`boosting::gbdt`). Keep a running per-row score (a logit) initialized to the prior log-odds of the labels. At each iteration:
    - For every row, compute two numbers describing "how wrong is the current score for this row, and how confidently": gradient and hessian of the logistic loss. They're packed as `[f32; 2]` so the inner loop loads both in one 8-byte read.
@@ -47,7 +47,6 @@ The rest is performance tricks. End-to-end flow of one `GbdtTrainer::fit` call:
 
 3. **Inner loop: grow one tree** (`tree::learner`, `tree::histogram`, `tree::split`). Start with one leaf containing all (sampled) rows. Repeatedly pick the leaf whose best split improves the loss the most, and split it in two. Stop when `num_leaves` is hit, or when no remaining leaf has a split that passes the `min_data_in_leaf` / `min_gain_to_split` thresholds. Finding the best split is the hot path:
    - For the leaf's rows, build a small table per feature: for each bucket id, the sum of gradients, sum of hessians, and row count. The best split is then a single scan over those tables — the regularized gain formula tells you the best place to cut, with L1/L2 penalties from `lambda_l1` / `lambda_l2`. Missing values (bucket 0) are routed to whichever side maximizes gain; that direction is recorded on the node so prediction reproduces it.
-   - For categorical features, an ordered scan would just produce a random subset, so split search instead **sorts active bins by `grad/(hess + cat_smooth)` and prefix-scans both directions** (LightGBM-style). The resulting split sends a bin subset (`left_bins`) left and everything else, including missing, right. An additional `cat_l2` is added on top of `lambda_l2` for the categorical gain calculation.
    - **Sibling-by-subtraction** (load-bearing perf trick): after a split, only build those tables from scratch for the **smaller** child. The larger child's tables are computed as `parent − smaller`. Breaking this invariant doubles tree-build time.
    - Tree storage: internal nodes are `SplitNode`s in `tree.nodes`; leaf values are in `tree.leaf_values`. Child pointers use a sentinel — **negative means leaf, encoded as `!(idx as i32)`**; non-negative is an internal-node index.
 

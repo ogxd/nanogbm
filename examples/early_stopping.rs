@@ -46,12 +46,8 @@ fn main() {
     cfg.verbose = true;
     cfg.seed = 0;
 
-    let schema = nanogbm::feature::Schema::all_numerical(d);
-    let train = DatasetBuilder::from_rows(&tx, 3000, &schema, &ty, &cfg).unwrap();
-    // Validation set MUST reuse the training bin mappers so val bins line up
-    // with the trees' learned `threshold_bin`s.
-    let valid =
-        DatasetBuilder::from_rows_with_mappers(&vx, 1000, train.bin_mappers(), &vy).unwrap();
+    let train = DatasetBuilder::from_rows(&tx, 3000, d, &ty, &cfg).unwrap();
+    let valid = DatasetBuilder::from_rows(&vx, 1000, d, &vy, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, Some(&valid)).unwrap();
 
     let scores = model.predict_raw_scores(&vx, 1000);

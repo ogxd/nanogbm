@@ -42,8 +42,7 @@ fn main() {
     cfg.learning_rate = 0.1;
     cfg.seed = 0;
 
-    let schema = nanogbm::feature::Schema::all_numerical(d);
-    let ds = DatasetBuilder::from_rows(&features, n, &schema, &labels, &cfg).unwrap();
+    let ds = DatasetBuilder::from_rows(&features, n, d, &labels, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
 
     let split = model.feature_importance_split();

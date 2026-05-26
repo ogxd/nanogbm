@@ -6,34 +6,24 @@ use serde::{Deserialize, Serialize};
 
 pub use learner::TreeLearner;
 
-/// Direction the missing values go on a numerical split. For categorical
-/// splits missing is always routed right.
+/// Direction the missing values go on a split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MissingDir {
     Left,
     Right,
 }
 
-/// How a split partitions rows on its feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SplitKind {
-    /// Ordered split: bin <= threshold_bin goes left. Missing follows `missing_dir`.
-    Numerical {
-        threshold_bin: u16,
-        threshold_value: f64,
-        missing_dir: MissingDir,
-    },
-    /// Subset split: any bin in `left_bins` goes left, everything else (including
-    /// MISSING bin 0) goes right. `left_bins` is sorted ascending for fast lookup.
-    Categorical { left_bins: Vec<u16> },
-}
-
 /// A single internal split node in a tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitNode {
     pub feature: u32,
-    pub kind: SplitKind,
-    pub left_child: i32,
+    /// Inclusive upper bound for the "left" branch in raw value space.
+    pub threshold: f64,
+    /// Inclusive upper bound for the "left" branch in bin-code space (for fast
+    /// training-time prediction on a bin-encoded dataset).
+    pub threshold_bin: u16,
+    pub missing_dir: MissingDir,
+    pub left_child: i32, // negative = leaf index (~leaf_idx), positive = internal node index
     pub right_child: i32,
     pub gain: f64,
 }
@@ -54,14 +44,7 @@ impl Tree {
         }
     }
 
-    /// Predict for a single raw-value feature row. The numerical case looks at
-    /// the raw `f64`; the categorical case bins the value via the model's
-    /// `BinMapper` (passed alongside the model). Because that mapping isn't
-    /// reachable from here, callers must go through `predict::predict_raw_scores`
-    /// which threads the bin mappers in. For tree-only traversal with raw
-    /// values, this method assumes numerical splits and would mis-route
-    /// categoricals; the `Model::predict_raw_*` helpers route through bin codes
-    /// instead. See `predict.rs`.
+    /// Predict for a single raw-value feature row.
     pub fn predict_raw(&self, row: &[f64]) -> f64 {
         if self.nodes.is_empty() {
             return self.leaf_values[0];
@@ -70,22 +53,10 @@ impl Tree {
         loop {
             let node = &self.nodes[node_idx as usize];
             let v = row[node.feature as usize];
-            let go_left = match &node.kind {
-                SplitKind::Numerical {
-                    threshold_value,
-                    missing_dir,
-                    ..
-                } => {
-                    if !v.is_finite() {
-                        matches!(missing_dir, MissingDir::Left)
-                    } else {
-                        v <= *threshold_value
-                    }
-                }
-                // Categorical predict_raw is intentionally a no-op: there's no
-                // bin mapper here, so we send MISSING (and any value) right.
-                // Real categorical raw-path prediction goes through `predict.rs`.
-                SplitKind::Categorical { .. } => false,
+            let go_left = if !v.is_finite() {
+                matches!(node.missing_dir, MissingDir::Left)
+            } else {
+                v <= node.threshold
             };
             let next = if go_left {
                 node.left_child
@@ -108,7 +79,11 @@ impl Tree {
         loop {
             let node = &self.nodes[node_idx as usize];
             let bin = row_bins[node.feature as usize];
-            let go_left = bin_goes_left(&node.kind, bin);
+            let go_left = if bin == crate::dataset::MISSING_BIN {
+                matches!(node.missing_dir, MissingDir::Left)
+            } else {
+                bin <= node.threshold_bin
+            };
             let next = if go_left {
                 node.left_child
             } else {
@@ -131,7 +106,11 @@ impl Tree {
         loop {
             let node = &self.nodes[node_idx as usize];
             let bin = dataset.feature_column(node.feature as usize)[row];
-            let go_left = bin_goes_left(&node.kind, bin);
+            let go_left = if bin == crate::dataset::MISSING_BIN {
+                matches!(node.missing_dir, MissingDir::Left)
+            } else {
+                bin <= node.threshold_bin
+            };
             let next = if go_left {
                 node.left_child
             } else {
@@ -142,25 +121,5 @@ impl Tree {
             }
             node_idx = next;
         }
-    }
-}
-
-/// Per-node "does this bin code go left" decision. Categorical: bin must be in
-/// `left_bins` (MISSING bin 0 is never included, so MISSING goes right).
-#[inline]
-pub(crate) fn bin_goes_left(kind: &SplitKind, bin: u16) -> bool {
-    match kind {
-        SplitKind::Numerical {
-            threshold_bin,
-            missing_dir,
-            ..
-        } => {
-            if bin == crate::dataset::MISSING_BIN {
-                matches!(missing_dir, MissingDir::Left)
-            } else {
-                bin <= *threshold_bin
-            }
-        }
-        SplitKind::Categorical { left_bins } => left_bins.binary_search(&bin).is_ok(),
     }
 }

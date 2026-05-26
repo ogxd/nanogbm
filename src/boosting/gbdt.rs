@@ -24,7 +24,7 @@ impl<'a> GbdtTrainer<'a> {
     /// each iteration and apply early stopping (if configured).
     pub fn fit(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
         self.config.validate()?;
-        let objective = BinaryObjective::with_pos_weight(self.config.pos_weight);
+        let objective = BinaryObjective::default();
         let metric = BinaryLogloss;
 
         let n = train.n_rows();
@@ -159,7 +159,6 @@ impl<'a> GbdtTrainer<'a> {
             learning_rate: self.config.learning_rate,
             n_features,
             trees,
-            bin_mappers: train.bin_mappers().to_vec(),
         })
     }
 }

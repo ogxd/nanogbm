@@ -49,25 +49,10 @@ impl Schema {
         self.columns.iter().map(|c| c.name)
     }
     pub fn categorical_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.columns.iter().enumerate().filter_map(|(i, c)| (c.kind == ColumnKind::Categorical).then_some(i))
-    }
-    pub fn is_categorical(&self, i: usize) -> bool {
-        matches!(self.columns.get(i).map(|c| c.kind), Some(ColumnKind::Categorical))
-    }
-
-    /// Build a schema of `n` anonymous numerical columns. For callers that don't
-    /// route their features through a [`FeatureSink`] (e.g. raw test fixtures).
-    pub fn all_numerical(n: usize) -> Self {
-        Self { columns: (0..n).map(|_| Column { name: "feature", kind: ColumnKind::Numeric }).collect() }
-    }
-
-    /// Build a schema of `n` anonymous columns, marking `cat_indices` as categorical.
-    pub fn with_categorical_at(n: usize, cat_indices: &[usize]) -> Self {
-        let cat_set: std::collections::HashSet<usize> = cat_indices.iter().copied().collect();
-        let columns = (0..n)
-            .map(|i| Column { name: "feature", kind: if cat_set.contains(&i) { ColumnKind::Categorical } else { ColumnKind::Numeric } })
-            .collect();
-        Self { columns }
+        self.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| (c.kind == ColumnKind::Categorical).then_some(i))
     }
 
     /// Format a per-feature importance report as a sortable table.

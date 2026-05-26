@@ -1,9 +1,9 @@
 # nanogbm
 
 A small gradient boosting library, in pure Rust, with a deliberately narrow
-scope: **GBDT only, binary classification only, CPU only, dense numerical and
-native categorical features**. No DART/GOSS/RF, no multiclass, no ranking, no
-regression, no sparse inputs, no GPU, no FFI bindings.
+scope: **GBDT only, binary classification only, CPU only, dense numerical
+features**. No DART/GOSS/RF, no multiclass, no ranking, no regression, no
+sparse inputs, no GPU, no FFI bindings.
 
 What you get in return is a few thousand lines of code you can read end to
 end and actually follow — useful both as a learning artifact and as a
@@ -16,22 +16,11 @@ nanogbm = { git = "https://github.com/oginiaux/nanogbm" }
 
 ```rust
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
-use nanogbm::feature::Schema;
 
 let cfg = Config { num_iterations: 100, learning_rate: 0.1, num_leaves: 31, ..Config::default() };
-let schema = Schema::all_numerical(n_features);
-let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg)?;
+let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg)?;
 let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
 let probs = model.predict_proba(&features, n_rows);
-```
-
-For validation or inference data, **reuse the training bin mappers** so the
-bin boundaries line up with the trees' learned thresholds:
-
-```rust
-let valid = DatasetBuilder::from_rows_with_mappers(
-    &valid_features, n_valid, train.bin_mappers(), &valid_labels,
-)?;
 ```
 
 ## Why does this exist?
@@ -65,30 +54,24 @@ linking C++ through an FFI shim. `cargo build` and that's it.
 - **Bincode v2 serialization** with serde derives. Stable across runs;
   re-check after layout changes to `Tree`, `SplitNode`, `BinMapper`, or
   `Model`.
-- **Native categorical splits** (LightGBM-style). Columns marked categorical
-  in the `Schema` get a dedicated bin mapper that maps distinct integer
-  values to their own bins (capped by `Config::max_cat_bin`, with rare
-  values collapsed to MISSING). At split time the learner sorts active
-  bins by `grad / (hess + cat_smooth)` and prefix-scans both directions, so
-  the resulting split sends a bin *subset* one way — no ordinal assumption
-  on the values. There's an end-to-end test
-  (`categorical_treatment_beats_numerical_on_shuffled_ids`) that pits the
-  two treatments against each other on a shuffled high-cardinality ID
-  feature.
 - **A feature-encoding helper layer** (`nanogbm::feature`). You write one
   `encode_into` function that pushes `num`, `bool`, `cat`, `cat_hashed`, or
   `multi_hot` values into a sink, and run it twice — once with
   `DiscoverySink` to derive a `Schema`, then with `SliceSink` per row on the
-  hot path. `cat` and `cat_hashed` mark their columns as categorical in the
-  schema, which then drives native categorical bin mappers and subset
-  splits in the learner. Use `multi_hot` when you want explicit one-hot
-  expansion instead.
+  hot path. Worth being precise here: the schema *knows* which columns are
+  categorical (the feature-importance printer uses it), but the learner does
+  **not** do native categorical splits. `cat(v)` writes `v as f64`,
+  `cat_hashed` writes a hash bucket index as `f64`, and the trees then split
+  those columns numerically like any other feature. If you need true subset
+  splits, expand to one-hot via `multi_hot` and let the learner work on
+  that.
 
 ## What's not in the box
 
 | Thing                            | Status                                              |
 |----------------------------------|-----------------------------------------------------|
 | Multiclass / regression / rank   | No                                                  |
+| Native categorical splits        | No — categoricals encode to numeric, see `feature`  |
 | Sparse input                     | No                                                  |
 | DART / GOSS / RF mode            | No                                                  |
 | GPU                              | No                                                  |

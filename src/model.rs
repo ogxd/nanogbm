@@ -5,26 +5,21 @@ use std::path::Path;
 use bincode::config::standard;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{BinMapper, Dataset};
+use crate::dataset::Dataset;
 use crate::error::{Error, Result};
 use crate::objective::binary::sigmoid;
-use crate::tree::{SplitKind, Tree, bin_goes_left};
+use crate::tree::Tree;
 
 /// A trained GBDT model: ensemble of trees plus boosting metadata.
 ///
-/// Fields are crate-private to keep model invariants (e.g. `bin_mappers.len() ==
-/// n_features`) intact. Inspect a model through the accessor methods or the
-/// `predict_*` methods.
+/// Fields are crate-private. Inspect a model through the accessor methods or
+/// the `predict_*` methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub(crate) init_score: f64,
     pub(crate) learning_rate: f64,
     pub(crate) n_features: usize,
     pub(crate) trees: Vec<Tree>,
-    /// Per-feature bin mapper, needed for routing raw-value categorical splits.
-    /// `#[serde(default)]` keeps backward compatibility with pre-categorical models.
-    #[serde(default)]
-    pub(crate) bin_mappers: Vec<BinMapper>,
 }
 
 impl Model {
@@ -52,13 +47,6 @@ impl Model {
     /// The trees themselves, in fit order.
     pub fn trees(&self) -> &[Tree] {
         &self.trees
-    }
-
-    /// Per-feature bin mappers learned at training time. Reuse these when
-    /// binning validation/inference data so val bins match train bins —
-    /// see [`crate::dataset::DatasetBuilder::from_rows_with_mappers`].
-    pub fn bin_mappers(&self) -> &[BinMapper] {
-        &self.bin_mappers
     }
 
     /// Bincode-serialize this model to `path`.
@@ -121,18 +109,12 @@ impl Model {
             n_features
         );
         let init = self.init_score;
-        let has_mappers = !self.bin_mappers.is_empty();
         (0..n_rows)
             .map(|row| {
                 let r = &features[row * n_features..(row + 1) * n_features];
                 let mut s = init;
                 for tree in &self.trees {
-                    let v = if has_mappers {
-                        predict_tree_with_mappers(tree, r, &self.bin_mappers)
-                    } else {
-                        tree.predict_raw(r)
-                    };
-                    s += self.learning_rate * v;
+                    s += self.learning_rate * tree.predict_raw(r);
                 }
                 s
             })
@@ -148,7 +130,7 @@ impl Model {
 
     /// Predict raw additive scores against an already-binned dataset. Use this
     /// for fast inference paths where you can afford to bin once and predict
-    /// many times; the dataset's bin mappers must match `self.bin_mappers()`.
+    /// many times.
     pub fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let n = dataset.n_rows();
         let mut scores = vec![self.init_score; n];
@@ -164,46 +146,5 @@ impl Model {
     pub fn predict_proba_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let raw = self.predict_raw_scores_on_dataset(dataset);
         raw.into_iter().map(sigmoid).collect()
-    }
-}
-
-/// Walk a single tree on a raw-value row, using `bin_mappers` to route through
-/// the same code path as the bin-encoded predict (so categorical splits work).
-#[inline]
-fn predict_tree_with_mappers(tree: &Tree, row: &[f64], bin_mappers: &[BinMapper]) -> f64 {
-    if tree.nodes.is_empty() {
-        return tree.leaf_values[0];
-    }
-    let mut node_idx: i32 = 0;
-    loop {
-        let node = &tree.nodes[node_idx as usize];
-        let feat = node.feature as usize;
-        let v = row[feat];
-        let go_left = match &node.kind {
-            SplitKind::Numerical {
-                threshold_value,
-                missing_dir,
-                ..
-            } => {
-                if !v.is_finite() {
-                    matches!(missing_dir, crate::tree::MissingDir::Left)
-                } else {
-                    v <= *threshold_value
-                }
-            }
-            SplitKind::Categorical { .. } => {
-                let bin = bin_mappers[feat].value_to_bin(v);
-                bin_goes_left(&node.kind, bin)
-            }
-        };
-        let next = if go_left {
-            node.left_child
-        } else {
-            node.right_child
-        };
-        if next < 0 {
-            return tree.leaf_values[(!next) as usize];
-        }
-        node_idx = next;
     }
 }

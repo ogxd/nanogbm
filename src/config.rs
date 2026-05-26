@@ -76,47 +76,6 @@ pub struct Config {
     /// If `true`, log per-iteration validation/training metric and an
     /// end-of-fit timing breakdown to stderr.
     pub verbose: bool,
-
-    /// Maximum distinct values per categorical column (including the reserved
-    /// MISSING bin). Excess low-frequency values collapse to MISSING.
-    #[serde(default = "default_max_cat_bin")]
-    pub max_cat_bin: usize,
-
-    /// Smoothing constant in the categorical sort key `grad / (hess +
-    /// cat_smooth)`. Higher = less sensitive to small-count bins.
-    #[serde(default = "default_cat_smooth")]
-    pub cat_smooth: f64,
-
-    /// Additional L2 added on top of `lambda_l2` during the *categorical*
-    /// split gain calculation, to further penalize tiny-bin splits.
-    #[serde(default = "default_cat_l2")]
-    pub cat_l2: f64,
-
-    /// Cap on the number of bins on the "left" side of a categorical subset
-    /// split. Limits the size of `SplitKind::Categorical::left_bins`.
-    #[serde(default = "default_max_cat_threshold")]
-    pub max_cat_threshold: usize,
-
-    /// Multiplier applied to the gradient and hessian of positive
-    /// (`y >= 0.5`) samples. Use for class imbalance; `1.0` is unweighted.
-    #[serde(default = "default_pos_weight")]
-    pub pos_weight: f64,
-}
-
-fn default_max_cat_bin() -> usize {
-    1024
-}
-fn default_cat_smooth() -> f64 {
-    10.0
-}
-fn default_cat_l2() -> f64 {
-    10.0
-}
-fn default_max_cat_threshold() -> usize {
-    32
-}
-fn default_pos_weight() -> f64 {
-    1.0
 }
 
 impl Default for Config {
@@ -139,11 +98,6 @@ impl Default for Config {
             early_stopping_round: 0,
             seed: 0,
             verbose: false,
-            max_cat_bin: default_max_cat_bin(),
-            cat_smooth: default_cat_smooth(),
-            cat_l2: default_cat_l2(),
-            max_cat_threshold: default_max_cat_threshold(),
-            pos_weight: default_pos_weight(),
         }
     }
 }
@@ -164,21 +118,6 @@ impl Config {
         }
         if !(0.0 < self.bagging_fraction && self.bagging_fraction <= 1.0) {
             return Err(Error::Config("bagging_fraction must be in (0, 1]".into()));
-        }
-        if self.max_cat_bin < 2 {
-            return Err(Error::Config("max_cat_bin must be >= 2".into()));
-        }
-        if self.cat_smooth < 0.0 {
-            return Err(Error::Config("cat_smooth must be >= 0".into()));
-        }
-        if self.cat_l2 < 0.0 {
-            return Err(Error::Config("cat_l2 must be >= 0".into()));
-        }
-        if self.max_cat_threshold < 1 {
-            return Err(Error::Config("max_cat_threshold must be >= 1".into()));
-        }
-        if self.pos_weight <= 0.0 || self.pos_weight.is_nan() {
-            return Err(Error::Config("pos_weight must be > 0".into()));
         }
         Ok(())
     }

@@ -31,8 +31,7 @@ fn main() {
     cfg.num_leaves = 15;
     cfg.seed = 0;
 
-    let schema = nanogbm::feature::Schema::all_numerical(n_features);
-    let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg).unwrap();
+    let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, None).unwrap();
 
     let probs = model.predict_proba(&features[..10 * n_features], 10);

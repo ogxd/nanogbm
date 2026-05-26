@@ -7,7 +7,7 @@ use crate::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
 use crate::tree::split::{SplitInfo, find_best_split_for_feature, threshold_leaf};
-use crate::tree::{SplitKind, SplitNode, Tree};
+use crate::tree::{MissingDir, SplitNode, Tree};
 
 /// Cumulative per-phase wall-clock counters (one global instance, set from
 /// gbdt.rs at end of fit). Cells because all training is single-threaded.
@@ -171,34 +171,8 @@ impl<'a> TreeLearner<'a> {
             let n_parent = parent.indices.len();
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
-            let num_bins = self.dataset.bin_mapper(split.feature).num_bins();
-            // `go_left_for_bin[bin]` is the partition decision for that bin code;
-            // precomputed once so the unsafe hot loop is a simple table lookup.
-            let mut go_left_for_bin: Vec<bool> = vec![false; num_bins];
-            match &split.kind {
-                SplitKind::Numerical {
-                    threshold_bin,
-                    missing_dir,
-                    ..
-                } => {
-                    let tb = *threshold_bin as usize;
-                    for (b, slot) in go_left_for_bin.iter_mut().enumerate() {
-                        *slot = if b == crate::dataset::MISSING_BIN as usize {
-                            matches!(missing_dir, crate::tree::MissingDir::Left)
-                        } else {
-                            b <= tb
-                        };
-                    }
-                }
-                SplitKind::Categorical { left_bins } => {
-                    for &b in left_bins {
-                        if (b as usize) < num_bins {
-                            go_left_for_bin[b as usize] = true;
-                        }
-                    }
-                    // MISSING (bin 0) stays false: missing always goes right for categorical splits.
-                }
-            }
+            let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
+            let threshold_bin = split.threshold_bin;
             unsafe {
                 let lp = left_indices.as_mut_ptr();
                 let rp = right_indices.as_mut_ptr();
@@ -206,11 +180,14 @@ impl<'a> TreeLearner<'a> {
                 let mut ri: usize = 0;
                 let parent_ptr = parent.indices.as_ptr();
                 let col_ptr = feat_col.as_ptr();
-                let go_ptr = go_left_for_bin.as_ptr();
                 for k in 0..n_parent {
                     let i = *parent_ptr.add(k);
-                    let bin = *col_ptr.add(i as usize) as usize;
-                    let goes_left = *go_ptr.add(bin);
+                    let bin = *col_ptr.add(i as usize);
+                    let goes_left = if bin == crate::dataset::MISSING_BIN {
+                        missing_goes_left
+                    } else {
+                        bin <= threshold_bin
+                    };
                     if goes_left {
                         *lp.add(li) = i;
                         li += 1;
@@ -244,7 +221,9 @@ impl<'a> TreeLearner<'a> {
             let new_node_idx = tree.nodes.len() as i32;
             tree.nodes.push(SplitNode {
                 feature: split.feature as u32,
-                kind: split.kind.clone(),
+                threshold: split.threshold_value,
+                threshold_bin: split.threshold_bin,
+                missing_dir: split.missing_dir,
                 left_child: encode_leaf(left_leaf_idx),
                 right_child: encode_leaf(right_leaf_idx),
                 gain: split.gain,
@@ -392,11 +371,9 @@ impl SplitInfo {
     fn dummy_worst() -> Self {
         Self {
             feature: 0,
-            kind: SplitKind::Numerical {
-                threshold_bin: 0,
-                threshold_value: 0.0,
-                missing_dir: crate::tree::MissingDir::Left,
-            },
+            threshold_bin: 0,
+            threshold_value: 0.0,
+            missing_dir: MissingDir::Left,
             gain: f64::NEG_INFINITY,
             left_sum_grad: 0.0,
             left_sum_hess: 0.0,
