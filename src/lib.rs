@@ -8,7 +8,6 @@
 //! ```no_run
 //! use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 //! use nanogbm::feature::Schema;
-//! use nanogbm::predict::predict_proba;
 //!
 //! # let n_rows = 1000usize;
 //! # let n_features = 5usize;
@@ -24,7 +23,26 @@
 //! let schema = Schema::all_numerical(n_features);
 //! let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg)?;
 //! let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
-//! let probs = predict_proba(&model, &features, n_rows, n_features);
+//! let probs = model.predict_proba(&features, n_rows);
+//! # Ok::<(), nanogbm::Error>(())
+//! ```
+//!
+//! For validation or inference data, reuse the training bin mappers so
+//! bin boundaries line up with the trees' learned thresholds:
+//!
+//! ```no_run
+//! # use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+//! # use nanogbm::feature::Schema;
+//! # let n_rows = 1000usize;
+//! # let n_features = 5usize;
+//! # let features: Vec<f64> = vec![0.0; n_rows * n_features];
+//! # let labels: Vec<f32> = vec![0.0; n_rows];
+//! # let cfg = Config::default();
+//! # let schema = Schema::all_numerical(n_features);
+//! # let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg)?;
+//! let valid = DatasetBuilder::from_rows_with_mappers(
+//!     &features, n_rows, train.bin_mappers(), &labels,
+//! )?;
 //! # Ok::<(), nanogbm::Error>(())
 //! ```
 //!

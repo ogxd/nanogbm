@@ -2,7 +2,6 @@
 //!
 //! Run with: `cargo run --release --example basic`
 
-use nanogbm::predict::predict_proba;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn main() {
@@ -36,7 +35,7 @@ fn main() {
     let train = DatasetBuilder::from_rows(&features, n_rows, &schema, &labels, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, None).unwrap();
 
-    let probs = predict_proba(&model, &features[..10 * n_features], 10, n_features);
+    let probs = model.predict_proba(&features[..10 * n_features], 10);
     for (i, p) in probs.iter().enumerate() {
         println!("row {i}: label={} p={p:.4}", labels[i]);
     }

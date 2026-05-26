@@ -4,7 +4,6 @@
 //! Run with: `cargo run --release --example early_stopping`
 
 use nanogbm::metric::{BinaryLogloss, Metric};
-use nanogbm::predict::predict_raw_scores;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn make_data(n: usize, d: usize, seed: u64) -> (Vec<f64>, Vec<f32>) {
@@ -49,10 +48,13 @@ fn main() {
 
     let schema = nanogbm::feature::Schema::all_numerical(d);
     let train = DatasetBuilder::from_rows(&tx, 3000, &schema, &ty, &cfg).unwrap();
-    let valid = DatasetBuilder::from_rows(&vx, 1000, &schema, &vy, &cfg).unwrap();
+    // Validation set MUST reuse the training bin mappers so val bins line up
+    // with the trees' learned `threshold_bin`s.
+    let valid =
+        DatasetBuilder::from_rows_with_mappers(&vx, 1000, train.bin_mappers(), &vy).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&train, Some(&valid)).unwrap();
 
-    let scores = predict_raw_scores(&model, &vx, 1000, d);
+    let scores = model.predict_raw_scores(&vx, 1000);
     let logloss = BinaryLogloss.evaluate(&scores, &vy);
-    println!("trees={} valid_logloss={logloss:.5}", model.trees.len());
+    println!("trees={} valid_logloss={logloss:.5}", model.n_trees());
 }

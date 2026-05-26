@@ -58,19 +58,25 @@ fn trains_and_reduces_logloss_on_synthetic() {
 
     let schema = Schema::all_numerical(d);
     let train_ds = DatasetBuilder::from_rows(&train_x, n_train, &schema, &train_y, &cfg).unwrap();
-    let valid_ds = DatasetBuilder::from_rows(&valid_x, n_valid, &schema, &valid_y, &cfg).unwrap();
+    let valid_ds = DatasetBuilder::from_rows_with_mappers(
+        &valid_x,
+        n_valid,
+        train_ds.bin_mappers(),
+        &valid_y,
+    )
+    .unwrap();
     let model = GbdtTrainer::new(&cfg)
         .fit(&train_ds, Some(&valid_ds))
         .unwrap();
 
-    assert!(!model.trees.is_empty());
+    assert!(model.n_trees() > 0);
 
     // Compare logloss of init prediction vs. trained model on validation set.
     let metric = BinaryLogloss;
-    let init_only_scores = vec![model.init_score; n_valid];
+    let init_only_scores = vec![model.init_score(); n_valid];
     let init_loss = metric.evaluate(&init_only_scores, &valid_y);
 
-    let final_scores = nanogbm::predict::predict_raw_scores(&model, &valid_x, n_valid, d);
+    let final_scores = model.predict_raw_scores(&valid_x, n_valid);
     let final_loss = metric.evaluate(&final_scores, &valid_y);
 
     println!("init_loss={init_loss:.5} final_loss={final_loss:.5}");
@@ -99,8 +105,8 @@ fn saved_model_round_trip_matches_predictions() {
     model.save(&tmp).unwrap();
     let loaded = Model::load(&tmp).unwrap();
 
-    let p1 = nanogbm::predict::predict_proba(&model, &x, n, d);
-    let p2 = nanogbm::predict::predict_proba(&loaded, &x, n, d);
+    let p1 = model.predict_proba(&x, n);
+    let p2 = loaded.predict_proba(&x, n);
     for (a, b) in p1.iter().zip(p2.iter()) {
         assert!((a - b).abs() < 1e-12);
     }
@@ -133,14 +139,8 @@ fn predict_bin_and_raw_paths_agree() {
     let ds = DatasetBuilder::from_rows(&x, n, &schema, &y, &cfg).unwrap();
     let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
 
-    let raw = nanogbm::predict::predict_raw_scores(&model, &x, n, d);
-
-    let mut bin_raw = vec![model.init_score; n];
-    for tree in &model.trees {
-        for row in 0..n {
-            bin_raw[row] += model.learning_rate * tree.predict_on_dataset(&ds, row);
-        }
-    }
+    let raw = model.predict_raw_scores(&x, n);
+    let bin_raw = model.predict_raw_scores_on_dataset(&ds);
 
     let max_abs = raw
         .iter()
@@ -218,7 +218,7 @@ fn categorical_treatment_beats_numerical_on_shuffled_ids() {
     let schema_num = Schema::all_numerical(1);
     let train_num = DatasetBuilder::from_rows(&train_x, n_train, &schema_num, &train_y, &cfg_num).unwrap();
     let model_num = GbdtTrainer::new(&cfg_num).fit(&train_num, None).unwrap();
-    let scores_num = nanogbm::predict::predict_raw_scores(&model_num, &valid_x, n_valid, 1);
+    let scores_num = model_num.predict_raw_scores(&valid_x, n_valid);
     let loss_num = metric.evaluate(&scores_num, &valid_y);
 
     // (2) categorical treatment of the ID column.
@@ -229,7 +229,7 @@ fn categorical_treatment_beats_numerical_on_shuffled_ids() {
     let schema_cat = Schema::with_categorical_at(1, &[0]);
     let train_cat = DatasetBuilder::from_rows(&train_x, n_train, &schema_cat, &train_y, &cfg_cat).unwrap();
     let model_cat = GbdtTrainer::new(&cfg_cat).fit(&train_cat, None).unwrap();
-    let scores_cat = nanogbm::predict::predict_raw_scores(&model_cat, &valid_x, n_valid, 1);
+    let scores_cat = model_cat.predict_raw_scores(&valid_x, n_valid);
     let loss_cat = metric.evaluate(&scores_cat, &valid_y);
 
     println!(
@@ -270,20 +270,15 @@ fn categorical_model_round_trip_and_path_consistency() {
     let tmp = std::env::temp_dir().join("nanogbm_cat_model.bin");
     model.save(&tmp).unwrap();
     let loaded = Model::load(&tmp).unwrap();
-    let p1 = nanogbm::predict::predict_proba(&model, &x, n, d);
-    let p2 = nanogbm::predict::predict_proba(&loaded, &x, n, d);
+    let p1 = model.predict_proba(&x, n);
+    let p2 = loaded.predict_proba(&x, n);
     for (a, b) in p1.iter().zip(p2.iter()) {
         assert!((a - b).abs() < 1e-12, "round-trip diverged: {a} vs {b}");
     }
 
     // Raw and bin paths must agree on the same rows.
-    let raw = nanogbm::predict::predict_raw_scores(&model, &x, n, d);
-    let mut bin_raw = vec![model.init_score; n];
-    for tree in &model.trees {
-        for row in 0..n {
-            bin_raw[row] += model.learning_rate * tree.predict_on_dataset(&ds, row);
-        }
-    }
+    let raw = model.predict_raw_scores(&x, n);
+    let bin_raw = model.predict_raw_scores_on_dataset(&ds);
     let max_abs = raw
         .iter()
         .zip(bin_raw.iter())

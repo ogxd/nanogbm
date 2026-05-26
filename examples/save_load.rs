@@ -2,7 +2,6 @@
 //!
 //! Run with: `cargo run --release --example save_load`
 
-use nanogbm::predict::predict_proba;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer, Model};
 
 fn main() {
@@ -46,8 +45,8 @@ fn main() {
     );
 
     let loaded = Model::load(&path).unwrap();
-    let p_orig = predict_proba(&model, &features, n, d);
-    let p_load = predict_proba(&loaded, &features, n, d);
+    let p_orig = model.predict_proba(&features, n);
+    let p_load = loaded.predict_proba(&features, n);
     let max_diff = p_orig
         .iter()
         .zip(&p_load)

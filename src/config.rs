@@ -2,39 +2,103 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Hyperparameters for GBDT training.
+/// Hyperparameters for GBDT training. Names match LightGBM conventions.
+///
+/// Construct with `Config { num_iterations: 100, ..Config::default() }`.
+/// Call [`Config::validate`] (the trainer does so automatically at the top of
+/// `fit`) to surface out-of-range values as [`crate::Error::Config`] instead of
+/// silently misbehaving.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Maximum number of boosting rounds (trees) to fit. With
+    /// `early_stopping_round > 0` and a validation set, training may stop
+    /// sooner and the model is truncated to the best iteration.
     pub num_iterations: usize,
+
+    /// Shrinkage applied to each tree's leaf values when added to the running
+    /// score: `score += learning_rate * leaf_value`. Smaller values need more
+    /// iterations but generalize better. Must be in `(0, 1]`.
     pub learning_rate: f64,
+
+    /// Maximum number of leaves per tree. Together with `max_depth`, controls
+    /// tree complexity. Must be `>= 2`.
     pub num_leaves: usize,
+
+    /// Maximum tree depth. `-1` means unlimited (let `num_leaves` cap things).
+    /// Use a positive cap to discourage very deep, narrow trees on noisy data.
     pub max_depth: i32,
+
+    /// Minimum number of samples in a leaf. Splits that would produce a leaf
+    /// with fewer rows are rejected. Higher = stronger regularization.
     pub min_data_in_leaf: usize,
+
+    /// Minimum sum of hessians in a leaf. Cheaper proxy for "this leaf has
+    /// enough signal to be worth splitting"; complements `min_data_in_leaf`.
     pub min_sum_hessian_in_leaf: f64,
+
+    /// L1 regularization on leaf values (soft-threshold in the gain formula).
     pub lambda_l1: f64,
+
+    /// L2 regularization on leaf values (denominator term in the gain formula).
     pub lambda_l2: f64,
+
+    /// Minimum loss reduction required to accept a split. Defaults to `0.0`;
+    /// raise it to prune trivially-improving splits on noisy datasets.
     pub min_gain_to_split: f64,
+
+    /// Maximum bins per numerical feature (includes one slot for the MISSING
+    /// bin, so at most `max_bin - 1` real bins). Must be in `[2, 65535]`.
     pub max_bin: usize,
+
+    /// Minimum samples per histogram bin when fitting numerical bin mappers.
+    /// Bins with fewer samples get merged into neighbors.
     pub min_data_in_bin: usize,
+
+    /// Per-tree feature subsample fraction in `(0, 1]`. `1.0` disables.
     pub feature_fraction: f64,
+
+    /// Row subsample fraction in `(0, 1]`. `1.0` disables. Only takes effect
+    /// when `bagging_freq > 0`.
     pub bagging_fraction: f64,
+
+    /// Re-sample bagged rows every `K` iterations. `0` disables bagging.
     pub bagging_freq: usize,
+
+    /// Stop after this many iterations without validation-metric improvement.
+    /// Only active when a validation set is passed to `fit`. `0` disables.
+    /// On stop, the model is truncated to `best_iter + 1` trees.
     pub early_stopping_round: usize,
+
+    /// Seed for the `ChaCha8Rng` used for bagging and feature subsampling.
+    /// Same config + same data => byte-identical model.
     pub seed: u64,
+
+    /// If `true`, log per-iteration validation/training metric and an
+    /// end-of-fit timing breakdown to stderr.
     pub verbose: bool,
-    /// Distinct values per categorical column; excess values collapse to MISSING.
+
+    /// Maximum distinct values per categorical column (including the reserved
+    /// MISSING bin). Excess low-frequency values collapse to MISSING.
     #[serde(default = "default_max_cat_bin")]
     pub max_cat_bin: usize,
-    /// Smoothing in the sort key grad/(hess + cat_smooth) for categorical scanning.
+
+    /// Smoothing constant in the categorical sort key `grad / (hess +
+    /// cat_smooth)`. Higher = less sensitive to small-count bins.
     #[serde(default = "default_cat_smooth")]
     pub cat_smooth: f64,
-    /// Additional L2 used during categorical split gain.
+
+    /// Additional L2 added on top of `lambda_l2` during the *categorical*
+    /// split gain calculation, to further penalize tiny-bin splits.
     #[serde(default = "default_cat_l2")]
     pub cat_l2: f64,
-    /// Cap on the number of bins on the "left" side of a categorical subset split.
+
+    /// Cap on the number of bins on the "left" side of a categorical subset
+    /// split. Limits the size of `SplitKind::Categorical::left_bins`.
     #[serde(default = "default_max_cat_threshold")]
     pub max_cat_threshold: usize,
-    /// Multiplier applied to gradient and hessian for positive (y >= 0.5) samples.
+
+    /// Multiplier applied to the gradient and hessian of positive
+    /// (`y >= 0.5`) samples. Use for class imbalance; `1.0` is unweighted.
     #[serde(default = "default_pos_weight")]
     pub pos_weight: f64,
 }

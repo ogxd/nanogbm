@@ -4,7 +4,6 @@
 //!
 //! Run with: `cargo run --release --example missing_and_importance`
 
-use nanogbm::predict::predict_proba;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn main() {
@@ -55,7 +54,7 @@ fn main() {
     }
 
     // Spot-check predictions on rows with missing values still work.
-    let probs = predict_proba(&model, &features[..5 * d], 5, d);
+    let probs = model.predict_proba(&features[..5 * d], 5);
     for (i, p) in probs.iter().enumerate() {
         let row = &features[i * d..(i + 1) * d];
         println!("row {i} {row:?} -> p={p:.4}");
