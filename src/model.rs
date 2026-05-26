@@ -5,7 +5,7 @@ use std::path::Path;
 use bincode::config::standard;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::Dataset;
+use crate::dataset::{Bin, BinData, BinMapper, BinWidth, Dataset};
 use crate::error::{Error, Result};
 use crate::objective::binary::sigmoid;
 use crate::tree::Tree;
@@ -19,6 +19,12 @@ pub struct Model {
     pub(crate) init_score: f64,
     pub(crate) learning_rate: f64,
     pub(crate) n_features: usize,
+    /// Per-feature [`BinMapper`] from the training [`Dataset`]. Required for
+    /// the binned inference path ([`Model::predict_proba_binned`]) — the
+    /// per-node `threshold_bin` values stored in trees are calibrated to
+    /// these specific mappers, so re-fitting them at predict time would
+    /// produce wrong predictions.
+    pub(crate) bin_mappers: Vec<BinMapper>,
     pub(crate) trees: Vec<Tree>,
 }
 
@@ -146,5 +152,107 @@ impl Model {
     pub fn predict_proba_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let raw = self.predict_raw_scores_on_dataset(dataset);
         raw.into_iter().map(sigmoid).collect()
+    }
+
+    /// Predict raw scores by binning the input features once (using the
+    /// [`BinMapper`]s stored at train time), then walking trees on bin
+    /// codes — significantly faster than [`Model::predict_raw_scores`] for
+    /// batch inference (>~10K rows). Predictions are equivalent: the trees
+    /// carry both raw and binned thresholds, so the two paths produce the
+    /// same leaves.
+    ///
+    /// Why it's faster:
+    /// - u8 / u16 comparison vs f64 comparison at every node visit.
+    /// - 47-byte rows fit in one cache line vs 376-byte f64 rows.
+    /// - No `is_finite` NaN check — missing maps to bin 0 once at binning time.
+    ///
+    /// # Panics
+    /// Panics if `features.len() != n_rows * self.n_features()`.
+    pub fn predict_raw_scores_binned(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
+        let dataset = self.bin_for_predict(features, n_rows);
+        self.predict_raw_scores_on_dataset(&dataset)
+    }
+
+    /// Like [`Model::predict_proba`] but uses the binned inference path. See
+    /// [`Model::predict_raw_scores_binned`] for the rationale and tradeoffs.
+    pub fn predict_proba_binned(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
+        let raw = self.predict_raw_scores_binned(features, n_rows);
+        raw.into_iter().map(sigmoid).collect()
+    }
+
+    /// Bin `features` using `self.bin_mappers` and pack into a [`Dataset`]
+    /// suitable for the `*_on_dataset` predict paths. Width (u8 / u16) is
+    /// chosen by the max `num_bins` across mappers — same rule as
+    /// [`crate::dataset::DatasetBuilder`].
+    fn bin_for_predict(&self, features: &[f64], n_rows: usize) -> Dataset {
+        let n_features = self.n_features;
+        assert_eq!(
+            features.len(),
+            n_rows * n_features,
+            "features.len() {} != n_rows {} * n_features {}",
+            features.len(),
+            n_rows,
+            n_features
+        );
+        assert_eq!(
+            self.bin_mappers.len(),
+            n_features,
+            "model.bin_mappers.len() {} != n_features {}",
+            self.bin_mappers.len(),
+            n_features
+        );
+
+        let max_num_bins = self
+            .bin_mappers
+            .iter()
+            .map(|m| m.num_bins())
+            .max()
+            .unwrap_or(2);
+        let width = if max_num_bins <= 256 {
+            BinWidth::U8
+        } else {
+            BinWidth::U16
+        };
+
+        // Bin column-by-column from row-major raw features. Two passes per
+        // column: one to read the f64 column into a scratch, one to write
+        // bin codes. The scratch avoids re-striding the row-major buffer
+        // inside the inner loop.
+        let bin_data = match width {
+            BinWidth::U8 => BinData::U8(self.bin_columns::<u8>(features, n_rows, n_features)),
+            BinWidth::U16 => BinData::U16(self.bin_columns::<u16>(features, n_rows, n_features)),
+        };
+
+        Dataset {
+            n_rows,
+            n_features,
+            bin_data,
+            // The on_dataset predict path doesn't read bin_mappers — but the
+            // Dataset struct requires the field. Avoid the clone by handing
+            // out a reference-counted empty Vec? No — Dataset owns its
+            // mappers. Just clone; this is one-shot per predict batch.
+            bin_mappers: self.bin_mappers.clone(),
+            // Labels aren't read by predict; allocate an empty placeholder.
+            labels: Vec::new(),
+        }
+    }
+
+    fn bin_columns<B: Bin>(
+        &self,
+        features: &[f64],
+        n_rows: usize,
+        n_features: usize,
+    ) -> Vec<Vec<B>> {
+        (0..n_features)
+            .map(|feat| {
+                let bm = &self.bin_mappers[feat];
+                let mut col: Vec<B> = Vec::with_capacity(n_rows);
+                for row in 0..n_rows {
+                    let v = features[row * n_features + feat];
+                    col.push(B::from_u16(bm.value_to_bin(v)));
+                }
+                col
+            })
+            .collect()
     }
 }

@@ -130,3 +130,64 @@ fn predict_bin_and_raw_paths_agree() {
         "raw vs bin predictions diverged by {max_abs}"
     );
 }
+
+#[test]
+fn predict_proba_binned_matches_raw_proba() {
+    // Binned predict path must produce the same predictions as the raw f64
+    // predict path: the trees carry both `threshold` and `threshold_bin`, and
+    // the model now stores `bin_mappers` so the binned input gets the same
+    // bin codes the trees were trained against.
+    let n_train = 800;
+    let n_eval = 1500;
+    let d = 6;
+    let (tx, ty, ex, _ey) = make_classification(n_train, n_eval, d, 17);
+
+    let mut cfg = Config::default();
+    cfg.num_iterations = 15;
+    cfg.num_leaves = 21;
+    cfg.min_data_in_leaf = 5;
+    cfg.max_bin = 64;
+    cfg.lambda_l2 = 0.5;
+
+    let train_ds = DatasetBuilder::from_rows(&tx, n_train, d, &ty, &cfg).unwrap();
+    let model = GbdtTrainer::new(&cfg).fit(&train_ds, None).unwrap();
+
+    let raw_proba = model.predict_proba(&ex, n_eval);
+    let binned_proba = model.predict_proba_binned(&ex, n_eval);
+
+    let max_abs = raw_proba
+        .iter()
+        .zip(binned_proba.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_abs < 1e-9,
+        "raw vs binned proba diverged by {max_abs}"
+    );
+}
+
+#[test]
+fn binned_predict_survives_bincode_round_trip() {
+    // Saved/restored Model must still produce identical binned predictions:
+    // `bin_mappers` need to round-trip through bincode.
+    let n = 600;
+    let d = 4;
+    let (x, y, ex, _) = make_classification(n, n / 2, d, 31);
+    let mut cfg = Config::default();
+    cfg.num_iterations = 12;
+    cfg.num_leaves = 15;
+    cfg.min_data_in_leaf = 10;
+    cfg.max_bin = 48;
+    let ds = DatasetBuilder::from_rows(&x, n, d, &y, &cfg).unwrap();
+    let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
+
+    let tmp = std::env::temp_dir().join("nanogbm_model_binned.bin");
+    model.save(&tmp).unwrap();
+    let loaded = Model::load(&tmp).unwrap();
+
+    let before = model.predict_proba_binned(&ex, n / 2);
+    let after = loaded.predict_proba_binned(&ex, n / 2);
+    for (a, b) in before.iter().zip(after.iter()) {
+        assert!((a - b).abs() < 1e-12);
+    }
+}

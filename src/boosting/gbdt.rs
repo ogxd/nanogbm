@@ -158,6 +158,7 @@ impl<'a> GbdtTrainer<'a> {
             init_score,
             learning_rate: self.config.learning_rate,
             n_features,
+            bin_mappers: train.bin_mappers().to_vec(),
             trees,
         })
     }
