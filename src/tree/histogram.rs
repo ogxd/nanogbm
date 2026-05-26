@@ -1,3 +1,5 @@
+use crate::dataset::Bin;
+
 /// One histogram bin: gradient sum, hessian sum, row count.
 /// 24 bytes (8 + 8 + 4 + 4 padding) — sized to one machine word triple so
 /// a single cache line covers 2-3 bins on x86-64 / Apple Silicon.
@@ -41,16 +43,18 @@ impl FeatureHistogram {
     /// Accumulate gradient/hessian for `indices` rows on a single feature column.
     /// `gradhess[row] = [grad, hess]` — packed so one gather pulls both values.
     ///
-    /// Inner loop uses `get_unchecked` to elide bounds checks: bins are bounded
-    /// by `num_bins` (BinMapper invariant), rows are bounded by column.len()
-    /// (DatasetBuilder invariant); both are upheld by nanogbm's own pipeline.
-    pub fn build(&mut self, column: &[u16], indices: &[u32], gradhess: &[[f32; 2]]) {
+    /// Generic over the column element type `B: Bin` so u8 and u16 columns
+    /// share one inner loop. Inner loop uses `get_unchecked` to elide bounds
+    /// checks: bins are bounded by `num_bins` (BinMapper invariant), rows are
+    /// bounded by column.len() (DatasetBuilder invariant); both are upheld by
+    /// nanogbm's own pipeline.
+    pub fn build<B: Bin>(&mut self, column: &[B], indices: &[u32], gradhess: &[[f32; 2]]) {
         self.clear();
         let bins = self.bins.as_mut_ptr();
         unsafe {
             for &i in indices {
                 let row = i as usize;
-                let bin = *column.get_unchecked(row) as usize;
+                let bin = (*column.get_unchecked(row)).as_usize();
                 let gh = *gradhess.get_unchecked(row);
                 let b = bins.add(bin);
                 (*b).grad += gh[0] as f64;
@@ -62,14 +66,14 @@ impl FeatureHistogram {
 
     /// Root-level fast path: accumulate over ALL rows in column order (no
     /// `indices` indirection). Sequential reads on both column and gradhess.
-    pub fn build_full(&mut self, column: &[u16], gradhess: &[[f32; 2]]) {
+    pub fn build_full<B: Bin>(&mut self, column: &[B], gradhess: &[[f32; 2]]) {
         self.clear();
         debug_assert_eq!(column.len(), gradhess.len());
         let n = column.len();
         let bins = self.bins.as_mut_ptr();
         unsafe {
             for row in 0..n {
-                let bin = *column.get_unchecked(row) as usize;
+                let bin = (*column.get_unchecked(row)).as_usize();
                 let gh = *gradhess.get_unchecked(row);
                 let b = bins.add(bin);
                 (*b).grad += gh[0] as f64;
@@ -80,20 +84,33 @@ impl FeatureHistogram {
     }
 
     /// Compute `self = parent - sibling` (parent-minus-sibling histogram trick).
+    ///
+    /// The loop body operates on independent bins with no carried dependency
+    /// across iterations, so LLVM autovectorizes the f64 grad/hess subtraction
+    /// (NEON f64x2 / AVX f64x4). The `count` field is a separate u32 sub.
     pub fn subtract_into(
         parent: &FeatureHistogram,
         sibling: &FeatureHistogram,
         out: &mut FeatureHistogram,
     ) {
-        debug_assert_eq!(parent.num_bins(), sibling.num_bins());
-        debug_assert_eq!(parent.num_bins(), out.num_bins());
-        for i in 0..parent.num_bins() {
-            out.bins[i] = HistBin {
-                grad: parent.bins[i].grad - sibling.bins[i].grad,
-                hess: parent.bins[i].hess - sibling.bins[i].hess,
-                count: parent.bins[i].count - sibling.bins[i].count,
-                _pad: 0,
-            };
+        let n = parent.num_bins();
+        debug_assert_eq!(n, sibling.num_bins());
+        debug_assert_eq!(n, out.num_bins());
+        let p = parent.bins.as_ptr();
+        let s = sibling.bins.as_ptr();
+        let o = out.bins.as_mut_ptr();
+        // SAFETY: all three slices have length `n` (checked above).
+        unsafe {
+            for i in 0..n {
+                let pi = &*p.add(i);
+                let si = &*s.add(i);
+                *o.add(i) = HistBin {
+                    grad: pi.grad - si.grad,
+                    hess: pi.hess - si.hess,
+                    count: pi.count - si.count,
+                    _pad: 0,
+                };
+            }
         }
     }
 }
@@ -107,8 +124,8 @@ impl FeatureHistogram {
 ///
 /// `columns.len()` must equal `histograms.len()`; bins are addressed by
 /// `column[row] as usize` and must be in range of each histogram's `num_bins`.
-pub fn build_histograms_batched(
-    columns: &[&[u16]],
+pub fn build_histograms_batched<B: Bin>(
+    columns: &[&[B]],
     indices: &[u32],
     gradhess: &[[f32; 2]],
     histograms: &mut [FeatureHistogram],
@@ -120,7 +137,7 @@ pub fn build_histograms_batched(
     let n_feat = columns.len();
     // Pre-extract raw pointers so the inner loop doesn't reborrow on every iter.
     let bin_ptrs: Vec<*mut HistBin> = histograms.iter_mut().map(|h| h.bins.as_mut_ptr()).collect();
-    let col_ptrs: Vec<*const u16> = columns.iter().map(|c| c.as_ptr()).collect();
+    let col_ptrs: Vec<*const B> = columns.iter().map(|c| c.as_ptr()).collect();
     // SAFETY: every column has length >= max(indices), every histogram has
     // capacity matching its column's bin domain (caller upholds via DatasetBuilder).
     unsafe {
@@ -130,7 +147,7 @@ pub fn build_histograms_batched(
             let g = gh[0] as f64;
             let h = gh[1] as f64;
             for fi in 0..n_feat {
-                let bin = *col_ptrs.get_unchecked(fi).add(row) as usize;
+                let bin = (*col_ptrs.get_unchecked(fi).add(row)).as_usize();
                 let b = (*bin_ptrs.get_unchecked(fi)).add(bin);
                 (*b).grad += g;
                 (*b).hess += h;
@@ -142,8 +159,8 @@ pub fn build_histograms_batched(
 
 /// Row-major batched build for the root level (sequential row iteration, no
 /// `indices` indirection).
-pub fn build_histograms_batched_full(
-    columns: &[&[u16]],
+pub fn build_histograms_batched_full<B: Bin>(
+    columns: &[&[B]],
     gradhess: &[[f32; 2]],
     histograms: &mut [FeatureHistogram],
 ) {
@@ -154,14 +171,14 @@ pub fn build_histograms_batched_full(
     let n = gradhess.len();
     let n_feat = columns.len();
     let bin_ptrs: Vec<*mut HistBin> = histograms.iter_mut().map(|h| h.bins.as_mut_ptr()).collect();
-    let col_ptrs: Vec<*const u16> = columns.iter().map(|c| c.as_ptr()).collect();
+    let col_ptrs: Vec<*const B> = columns.iter().map(|c| c.as_ptr()).collect();
     unsafe {
         for row in 0..n {
             let gh = *gradhess.get_unchecked(row);
             let g = gh[0] as f64;
             let h = gh[1] as f64;
             for fi in 0..n_feat {
-                let bin = *col_ptrs.get_unchecked(fi).add(row) as usize;
+                let bin = (*col_ptrs.get_unchecked(fi).add(row)).as_usize();
                 let b = (*bin_ptrs.get_unchecked(fi)).add(bin);
                 (*b).grad += g;
                 (*b).hess += h;

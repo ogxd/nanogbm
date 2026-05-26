@@ -97,7 +97,10 @@ impl Tree {
     }
 
     /// Predict for one row of a column-major bin-encoded dataset, by walking
-    /// the tree and indexing into per-feature columns.
+    /// the tree and indexing into per-feature columns. The dataset's bin
+    /// width (u8/u16) is hidden behind `Dataset::feature_bin` which widens
+    /// to u16 for the comparison — a single load per node, no per-element
+    /// dispatch.
     pub fn predict_on_dataset(&self, dataset: &crate::dataset::Dataset, row: usize) -> f64 {
         if self.nodes.is_empty() {
             return self.leaf_values[0];
@@ -105,7 +108,7 @@ impl Tree {
         let mut node_idx: i32 = 0;
         loop {
             let node = &self.nodes[node_idx as usize];
-            let bin = dataset.feature_column(node.feature as usize)[row];
+            let bin = dataset.feature_bin(node.feature as usize, row);
             let go_left = if bin == crate::dataset::MISSING_BIN {
                 matches!(node.missing_dir, MissingDir::Left)
             } else {

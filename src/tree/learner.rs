@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::dataset::Dataset;
+use crate::dataset::{Bin, BinWidth, Dataset};
 use crate::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
@@ -102,20 +102,46 @@ impl<'a> TreeLearner<'a> {
 
         // Build root histograms over features (row-major batched: each row
         // touches gradhess once, then updates every feature's histogram in
-        // lockstep).
+        // lockstep). Dispatch on the dataset's bin width so the inner loop is
+        // type-stable (u8 vs u16) without per-element widening.
         let t0 = std::time::Instant::now();
         let mut root_histograms: Vec<FeatureHistogram> = feature_indices
             .iter()
             .map(|&feat| FeatureHistogram::zeros(self.dataset.bin_mapper(feat).num_bins()))
             .collect();
-        let root_columns: Vec<&[u16]> = feature_indices
-            .iter()
-            .map(|&feat| self.dataset.feature_column(feat))
-            .collect();
-        if full {
-            build_histograms_batched_full(&root_columns, gradhess, &mut root_histograms);
-        } else {
-            build_histograms_batched(&root_columns, row_indices, gradhess, &mut root_histograms);
+        match self.dataset.bin_width() {
+            BinWidth::U8 => {
+                let root_columns: Vec<&[u8]> = feature_indices
+                    .iter()
+                    .map(|&feat| self.dataset.feature_column_u8(feat))
+                    .collect();
+                if full {
+                    build_histograms_batched_full(&root_columns, gradhess, &mut root_histograms);
+                } else {
+                    build_histograms_batched(
+                        &root_columns,
+                        row_indices,
+                        gradhess,
+                        &mut root_histograms,
+                    );
+                }
+            }
+            BinWidth::U16 => {
+                let root_columns: Vec<&[u16]> = feature_indices
+                    .iter()
+                    .map(|&feat| self.dataset.feature_column_u16(feat))
+                    .collect();
+                if full {
+                    build_histograms_batched_full(&root_columns, gradhess, &mut root_histograms);
+                } else {
+                    build_histograms_batched(
+                        &root_columns,
+                        row_indices,
+                        gradhess,
+                        &mut root_histograms,
+                    );
+                }
+            }
         }
         TimingBuckets::add(&self.timing.hist_build, t0.elapsed());
 
@@ -167,37 +193,26 @@ impl<'a> TreeLearner<'a> {
             // pre-size the Vecs and use unchecked writes to avoid the per-push
             // capacity check + branch.
             let t_p = std::time::Instant::now();
-            let feat_col = self.dataset.feature_column(split.feature);
-            let n_parent = parent.indices.len();
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
             let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
-            let threshold_bin = split.threshold_bin;
-            unsafe {
-                let lp = left_indices.as_mut_ptr();
-                let rp = right_indices.as_mut_ptr();
-                let mut li: usize = 0;
-                let mut ri: usize = 0;
-                let parent_ptr = parent.indices.as_ptr();
-                let col_ptr = feat_col.as_ptr();
-                for k in 0..n_parent {
-                    let i = *parent_ptr.add(k);
-                    let bin = *col_ptr.add(i as usize);
-                    let goes_left = if bin == crate::dataset::MISSING_BIN {
-                        missing_goes_left
-                    } else {
-                        bin <= threshold_bin
-                    };
-                    if goes_left {
-                        *lp.add(li) = i;
-                        li += 1;
-                    } else {
-                        *rp.add(ri) = i;
-                        ri += 1;
-                    }
-                }
-                left_indices.set_len(li);
-                right_indices.set_len(ri);
+            match self.dataset.bin_width() {
+                BinWidth::U8 => partition_indices::<u8>(
+                    self.dataset.feature_column_u8(split.feature),
+                    &parent.indices,
+                    split.threshold_bin,
+                    missing_goes_left,
+                    &mut left_indices,
+                    &mut right_indices,
+                ),
+                BinWidth::U16 => partition_indices::<u16>(
+                    self.dataset.feature_column_u16(split.feature),
+                    &parent.indices,
+                    split.threshold_bin,
+                    missing_goes_left,
+                    &mut left_indices,
+                    &mut right_indices,
+                ),
             }
             TimingBuckets::add(&self.timing.partition, t_p.elapsed());
 
@@ -254,11 +269,22 @@ impl<'a> TreeLearner<'a> {
                 .enumerate()
                 .map(|(slot, _)| FeatureHistogram::zeros(parent.histograms[slot].num_bins()))
                 .collect();
-            let small_columns: Vec<&[u16]> = feature_indices
-                .iter()
-                .map(|&feat| self.dataset.feature_column(feat))
-                .collect();
-            build_histograms_batched(&small_columns, small_indices, gradhess, &mut small_hists);
+            match self.dataset.bin_width() {
+                BinWidth::U8 => {
+                    let cols: Vec<&[u8]> = feature_indices
+                        .iter()
+                        .map(|&feat| self.dataset.feature_column_u8(feat))
+                        .collect();
+                    build_histograms_batched(&cols, small_indices, gradhess, &mut small_hists);
+                }
+                BinWidth::U16 => {
+                    let cols: Vec<&[u16]> = feature_indices
+                        .iter()
+                        .map(|&feat| self.dataset.feature_column_u16(feat))
+                        .collect();
+                    build_histograms_batched(&cols, small_indices, gradhess, &mut small_hists);
+                }
+            }
             TimingBuckets::add(&self.timing.hist_build, t_h.elapsed());
 
             let t_s = std::time::Instant::now();
@@ -382,5 +408,50 @@ impl SplitInfo {
             right_sum_hess: 0.0,
             right_count: 0,
         }
+    }
+}
+
+/// Split `parent_indices` into left/right partitions using a single feature
+/// column. Generic over the bin element type so the comparison happens in the
+/// column's native width (u8 vs u16) — avoids widening every element to u16.
+///
+/// SAFETY: `feat_col.len()` must be at least `max(parent_indices) + 1`, and
+/// `left_out`/`right_out` must have capacity for the (caller-known) exact
+/// left/right counts derived from the SplitInfo.
+fn partition_indices<B: Bin>(
+    feat_col: &[B],
+    parent_indices: &[u32],
+    threshold_bin: u16,
+    missing_goes_left: bool,
+    left_out: &mut Vec<u32>,
+    right_out: &mut Vec<u32>,
+) {
+    let threshold = B::from_u16(threshold_bin);
+    let n_parent = parent_indices.len();
+    unsafe {
+        let lp = left_out.as_mut_ptr();
+        let rp = right_out.as_mut_ptr();
+        let mut li: usize = 0;
+        let mut ri: usize = 0;
+        let parent_ptr = parent_indices.as_ptr();
+        let col_ptr = feat_col.as_ptr();
+        for k in 0..n_parent {
+            let i = *parent_ptr.add(k);
+            let bin = *col_ptr.add(i as usize);
+            let goes_left = if bin == B::MISSING {
+                missing_goes_left
+            } else {
+                bin <= threshold
+            };
+            if goes_left {
+                *lp.add(li) = i;
+                li += 1;
+            } else {
+                *rp.add(ri) = i;
+                ri += 1;
+            }
+        }
+        left_out.set_len(li);
+        right_out.set_len(ri);
     }
 }

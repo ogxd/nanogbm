@@ -27,7 +27,23 @@ rand_chacha = "0.3"
 thiserror = "1.0"
 gxhash = "3.5"
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hot_paths"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# Benches inherit `release`, but criterion measurements are sharper with
+# slightly different settings. Override here so `cargo bench` runs with full
+# optimization but without LTO (faster builds, identical inner-loop codegen).
+[profile.bench]
+opt-level = 3
+lto = false
+codegen-units = 1
+debug = false

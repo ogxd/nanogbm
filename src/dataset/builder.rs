@@ -1,4 +1,4 @@
-use super::{BinMapper, Dataset};
+use super::{Bin, BinData, BinMapper, BinWidth, Dataset};
 use crate::config::Config;
 use crate::error::{Error, Result};
 
@@ -28,14 +28,24 @@ impl DatasetBuilder {
         let n_features = columns.len();
         let n_rows = check_columns(&columns, labels)?;
 
-        let (bin_mappers, bin_data): (Vec<BinMapper>, Vec<Vec<u16>>) = columns
+        // Storage width: u8 if every column fits in a byte. `config.max_bin`
+        // is the upper bound on `num_bins` per column (BinMapper enforces it),
+        // so we can decide globally without inspecting fitted mappers.
+        let width = if config.max_bin <= 256 {
+            BinWidth::U8
+        } else {
+            BinWidth::U16
+        };
+
+        let bin_mappers: Vec<BinMapper> = columns
             .iter()
-            .map(|col| {
-                let bm = BinMapper::fit(col, config.max_bin, config.min_data_in_bin);
-                let bins: Vec<u16> = col.iter().map(|&v| bm.value_to_bin(v)).collect();
-                (bm, bins)
-            })
-            .unzip();
+            .map(|col| BinMapper::fit(col, config.max_bin, config.min_data_in_bin))
+            .collect();
+
+        let bin_data = match width {
+            BinWidth::U8 => BinData::U8(encode_columns::<u8>(&columns, &bin_mappers)),
+            BinWidth::U16 => BinData::U16(encode_columns::<u16>(&columns, &bin_mappers)),
+        };
 
         Ok(Dataset {
             n_rows,
@@ -45,6 +55,16 @@ impl DatasetBuilder {
             labels: labels.to_vec(),
         })
     }
+}
+
+/// Encode each f64 column into bins of type `B` using its fitted [`BinMapper`].
+/// `BinMapper::value_to_bin` always returns u16 — we narrow via [`Bin::from_u16`].
+fn encode_columns<B: Bin>(columns: &[Vec<f64>], mappers: &[BinMapper]) -> Vec<Vec<B>> {
+    columns
+        .iter()
+        .zip(mappers.iter())
+        .map(|(col, bm)| col.iter().map(|&v| B::from_u16(bm.value_to_bin(v))).collect())
+        .collect()
 }
 
 fn rows_to_columns(features: &[f64], n_rows: usize, n_features: usize) -> Result<Vec<Vec<f64>>> {
