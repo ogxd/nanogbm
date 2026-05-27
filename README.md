@@ -11,7 +11,7 @@ no-FFI dependency in a Rust service.
 
 ```toml
 [dependencies]
-nanogbm = "0.3"
+nanogbm = "0.4"
 ```
 
 ```rust
