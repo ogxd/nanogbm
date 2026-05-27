@@ -41,6 +41,7 @@ pub mod boosting;
 pub mod config;
 pub mod dataset;
 pub mod error;
+pub mod feature;
 pub mod loss;
 pub mod model;
 pub mod tree;
