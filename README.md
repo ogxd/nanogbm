@@ -11,7 +11,7 @@ no-FFI dependency in a Rust service.
 
 ```toml
 [dependencies]
-nanogbm = "0.1"
+nanogbm = "0.2"
 ```
 
 ```rust
@@ -33,7 +33,9 @@ primary purpose of this code.
 
 The secondary purpose is practical: when you want to train a model from
 inside a Rust service, a pure-Rust crate is a much smaller commitment than
-linking C++ through an FFI shim. `cargo build` and that's it.
+linking C++ through an FFI shim. `cargo build` and that's it.  
+
+Performance-wise, nanogbm is supposed to be as fast, if not faster, than LightGBM, thanks to optimizations tailored to the GBDT + histogram learner + binary logistic loss subset.
 
 ## What's actually in the box
 
