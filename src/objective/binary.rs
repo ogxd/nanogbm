@@ -80,14 +80,6 @@ impl Objective for BinaryObjective {
         }
     }
 
-    fn gradients(&self, raw_scores: &[f64], labels: &[f32], grads: &mut [f32], hesss: &mut [f32]) {
-        for i in 0..raw_scores.len() {
-            let p = sigmoid(raw_scores[i]);
-            grads[i] = (p - labels[i] as f64) as f32;
-            hesss[i] = (p * (1.0 - p)).max(1e-6) as f32;
-        }
-    }
-
     /// Pack-aware variant: write `[grad, hess]` pairs into a single buffer so
     /// the histogram-build hot loop can fetch both values in one memory access
     /// (8-byte aligned), halving the per-row gather count vs separate arrays.

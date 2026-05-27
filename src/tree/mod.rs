@@ -102,32 +102,6 @@ impl Tree {
         }
     }
 
-    /// Predict for a row given by its bin codes (fast path during training).
-    pub fn predict_bin_row(&self, row_bins: &[u16]) -> f64 {
-        if self.nodes.is_empty() {
-            return self.leaf_values[0];
-        }
-        let mut node_idx: i32 = 0;
-        loop {
-            let node = &self.nodes[node_idx as usize];
-            let bin = row_bins[node.feature as usize];
-            let go_left = if bin == crate::dataset::MISSING_BIN {
-                matches!(node.missing_dir, MissingDir::Left)
-            } else {
-                bin <= node.threshold_bin
-            };
-            let next = if go_left {
-                node.left_child
-            } else {
-                node.right_child
-            };
-            if next < 0 {
-                return self.leaf_values[(!next) as usize];
-            }
-            node_idx = next;
-        }
-    }
-
     /// Predict for one row of a column-major bin-encoded dataset, by walking
     /// the tree and indexing into per-feature columns. Convenience wrapper
     /// around [`Tree::predict_on_columns`] — does an enum match on
