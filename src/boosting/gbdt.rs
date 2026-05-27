@@ -19,8 +19,8 @@ impl<'a> GbdtTrainer<'a> {
         Self { config }
     }
 
-    /// Train a GBDT model. If `valid` is provided, evaluate `binary_logloss` after
-    /// each iteration and apply early stopping (if configured).
+    /// Train a GBDT model. If `valid` is provided, evaluate `binary_logloss`
+    /// after each iteration and apply early stopping (if configured).
     pub fn fit(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
         self.config.validate()?;
 
@@ -41,9 +41,16 @@ impl<'a> GbdtTrainer<'a> {
         let mut best_score = f64::INFINITY;
         let mut best_iter: usize = 0;
         let mut rounds_no_improve: usize = 0;
-        let mut bagged_rows: Option<Vec<u32>> = None;
 
-        // Cumulative timing (for profiling).
+        // Allocated once and reused. `all_rows` and `all_features` are the
+        // no-subsample slices; `bagged_rows` is rewritten in-place every
+        // `bagging_freq` iterations.
+        let all_rows: Vec<u32> = (0..n as u32).collect();
+        let all_features: Vec<usize> = (0..n_features).collect();
+        let mut bagged_rows: Vec<u32> = Vec::new();
+        let bagging_on = self.config.bagging_fraction < 1.0 && self.config.bagging_freq > 0;
+        let feature_subsample_on = self.config.feature_fraction < 1.0;
+
         let mut t_gradients = std::time::Duration::ZERO;
         let mut t_tree = std::time::Duration::ZERO;
         let mut t_update_scores = std::time::Duration::ZERO;
@@ -51,26 +58,19 @@ impl<'a> GbdtTrainer<'a> {
 
         for iter in 0..self.config.num_iterations {
             let t0 = std::time::Instant::now();
-            // Gradients/hessians from current raw scores, packed.
             loss::gradients_packed(&raw_scores, train.labels(), &mut gradhess);
             t_gradients += t0.elapsed();
 
-            // Row bagging.
-            let row_indices: Vec<u32> = if self.config.bagging_fraction < 1.0
-                && self.config.bagging_freq > 0
-            {
+            let row_indices: &[u32] = if bagging_on {
                 if iter % self.config.bagging_freq == 0 {
-                    bagged_rows = Some(sample_indices(n, self.config.bagging_fraction, &mut rng));
+                    bagged_rows = sample_indices(n, self.config.bagging_fraction, &mut rng);
                 }
-                bagged_rows
-                    .clone()
-                    .unwrap_or_else(|| (0..n as u32).collect())
+                &bagged_rows
             } else {
-                (0..n as u32).collect()
+                &all_rows
             };
 
-            // Feature subsampling per tree.
-            let feature_indices: Vec<usize> = if self.config.feature_fraction < 1.0 {
+            let feature_subsample: Vec<usize> = if feature_subsample_on {
                 let mut all: Vec<usize> = (0..n_features).collect();
                 all.shuffle(&mut rng);
                 let k = ((n_features as f64 * self.config.feature_fraction).ceil() as usize).max(1);
@@ -78,20 +78,27 @@ impl<'a> GbdtTrainer<'a> {
                 all.sort_unstable();
                 all
             } else {
-                (0..n_features).collect()
+                Vec::new()
             };
+            let feature_indices: &[usize] = if feature_subsample_on {
+                &feature_subsample
+            } else {
+                &all_features
+            };
+
+            // `is_full` lets the learner skip the indices-indirection in the
+            // root histogram build and use the sequential `_full` path.
+            let is_full = !bagging_on;
 
             let t1 = std::time::Instant::now();
             let learner = TreeLearner::new(self.config, train, &timing);
             let (tree, row_to_leaf) =
-                learner.train_one_tree(&gradhess, &row_indices, &feature_indices);
+                learner.train_one_tree(&gradhess, row_indices, feature_indices, is_full);
             t_tree += t1.elapsed();
 
-            // Update raw_scores using the leaf assignment recorded during tree
-            // growth. This avoids re-walking the tree once per training row.
-            // Rows not in `row_indices` (e.g. bagged-out) still got leaf 0 by
-            // default; the tree's leaf 0 holds the root prediction, which is a
-            // reasonable fallback when bagging.
+            // Update raw_scores using the per-row leaf assignment recorded
+            // during tree growth — avoids re-walking the tree per row. Bagged-
+            // out rows stay mapped to leaf 0, which holds the root prediction.
             let t2 = std::time::Instant::now();
             let lr = self.config.learning_rate;
             for (row, s) in raw_scores.iter_mut().enumerate() {
@@ -100,7 +107,6 @@ impl<'a> GbdtTrainer<'a> {
             }
             t_update_scores += t2.elapsed();
 
-            // Evaluate on validation set.
             if let (Some(v), Some(vrs)) = (valid, valid_raw_scores.as_mut()) {
                 vrs.iter_mut().enumerate().for_each(|(row, s)| {
                     *s += lr * tree.predict_on_dataset(v, row);
@@ -120,7 +126,6 @@ impl<'a> GbdtTrainer<'a> {
                 if self.config.early_stopping_round > 0
                     && rounds_no_improve >= self.config.early_stopping_round
                 {
-                    // Truncate to best_iter + 1 trees.
                     trees.truncate(best_iter + 1);
                     break;
                 }

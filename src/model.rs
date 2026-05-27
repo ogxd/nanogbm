@@ -11,18 +11,13 @@ use crate::loss::sigmoid;
 use crate::tree::Tree;
 
 /// A trained GBDT model: ensemble of trees plus boosting metadata.
-///
-/// Fields are crate-private. Inspect a model through the accessor methods or
-/// the `predict_*` methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub(crate) init_score: f64,
     pub(crate) learning_rate: f64,
     pub(crate) n_features: usize,
-    /// Per-feature [`BinMapper`] from the training [`Dataset`]. Required for
-    /// the binned inference path ([`Model::predict_proba_binned`]) — the
-    /// per-node `threshold_bin` values stored in trees are calibrated to
-    /// these specific mappers, so re-fitting them at predict time would
+    /// Required by the binned inference path: per-node `threshold_bin` values
+    /// in trees are calibrated to these specific mappers, so re-fitting would
     /// produce wrong predictions.
     pub(crate) bin_mappers: Vec<BinMapper>,
     pub(crate) trees: Vec<Tree>,
@@ -134,15 +129,9 @@ impl Model {
         raw.into_iter().map(sigmoid).collect()
     }
 
-    /// Predict raw additive scores against an already-binned dataset. Use this
-    /// for fast inference paths where you can afford to bin once and predict
-    /// many times.
-    ///
-    /// Dispatches once on the dataset's bin width and pre-collects column
-    /// slices, then walks each tree on each row using a type-stable inner
-    /// loop ([`crate::tree::Tree::predict_on_columns`]). Avoids the per-node
-    /// `BinData::U8/U16` match that [`crate::tree::Tree::predict_on_dataset`]
-    /// otherwise incurs.
+    /// Predict raw additive scores against an already-binned dataset. Faster
+    /// than the raw f64 path when you can amortize binning across many
+    /// predict calls.
     pub fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let n = dataset.n_rows();
         let mut scores = vec![self.init_score; n];
@@ -153,9 +142,8 @@ impl Model {
         scores
     }
 
-    /// Tree-outer / row-inner accumulation onto `scores`. The tree-outer
-    /// order keeps the current tree's nodes hot in L1 across the full
-    /// row sweep.
+    /// Tree-outer / row-inner accumulation: keeps the current tree's nodes hot
+    /// in L1 across the full row sweep.
     fn predict_into_with_columns<B: Bin>(
         &self,
         columns: &[&[B]],
@@ -175,17 +163,10 @@ impl Model {
         raw.into_iter().map(sigmoid).collect()
     }
 
-    /// Predict raw scores by binning the input features once (using the
-    /// [`BinMapper`]s stored at train time), then walking trees on bin
-    /// codes — significantly faster than [`Model::predict_raw_scores`] for
-    /// batch inference (>~10K rows). Predictions are equivalent: the trees
-    /// carry both raw and binned thresholds, so the two paths produce the
-    /// same leaves.
-    ///
-    /// Why it's faster:
-    /// - u8 / u16 comparison vs f64 comparison at every node visit.
-    /// - 47-byte rows fit in one cache line vs 376-byte f64 rows.
-    /// - No `is_finite` NaN check — missing maps to bin 0 once at binning time.
+    /// Bin the inputs using the training-time mappers, then walk trees on bin
+    /// codes. Faster than [`Model::predict_raw_scores`] on batches (~10K+
+    /// rows): u8/u16 comparisons instead of f64, ~8× smaller rows, no NaN
+    /// check per node. Predictions match the raw path bit-for-bit.
     ///
     /// # Panics
     /// Panics if `features.len() != n_rows * self.n_features()`.
@@ -194,17 +175,14 @@ impl Model {
         self.predict_raw_scores_on_dataset(&dataset)
     }
 
-    /// Like [`Model::predict_proba`] but uses the binned inference path. See
-    /// [`Model::predict_raw_scores_binned`] for the rationale and tradeoffs.
+    /// Like [`Model::predict_proba`] but uses the binned inference path.
     pub fn predict_proba_binned(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
         let raw = self.predict_raw_scores_binned(features, n_rows);
         raw.into_iter().map(sigmoid).collect()
     }
 
-    /// Bin `features` using `self.bin_mappers` and pack into a [`Dataset`]
-    /// suitable for the `*_on_dataset` predict paths. Width (u8 / u16) is
-    /// chosen by the max `num_bins` across mappers — same rule as
-    /// [`crate::dataset::DatasetBuilder`].
+    /// Bin `features` with `self.bin_mappers` and pack into a Dataset. Width
+    /// choice mirrors [`crate::dataset::DatasetBuilder`].
     fn bin_for_predict(&self, features: &[f64], n_rows: usize) -> Dataset {
         let n_features = self.n_features;
         assert_eq!(
@@ -235,10 +213,6 @@ impl Model {
             BinWidth::U16
         };
 
-        // Bin column-by-column from row-major raw features. Two passes per
-        // column: one to read the f64 column into a scratch, one to write
-        // bin codes. The scratch avoids re-striding the row-major buffer
-        // inside the inner loop.
         let bin_data = match width {
             BinWidth::U8 => BinData::U8(self.bin_columns::<u8>(features, n_rows, n_features)),
             BinWidth::U16 => BinData::U16(self.bin_columns::<u16>(features, n_rows, n_features)),
@@ -248,12 +222,7 @@ impl Model {
             n_rows,
             n_features,
             bin_data,
-            // The on_dataset predict path doesn't read bin_mappers — but the
-            // Dataset struct requires the field. Avoid the clone by handing
-            // out a reference-counted empty Vec? No — Dataset owns its
-            // mappers. Just clone; this is one-shot per predict batch.
             bin_mappers: self.bin_mappers.clone(),
-            // Labels aren't read by predict; allocate an empty placeholder.
             labels: Vec::new(),
         }
     }

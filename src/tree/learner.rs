@@ -9,10 +9,8 @@ use crate::tree::histogram::{
 use crate::tree::split::{SplitInfo, find_best_split_for_feature, threshold_leaf};
 use crate::tree::{MissingDir, SplitNode, Tree};
 
-/// Cumulative per-phase wall-clock counters (one global instance, set from
-/// gbdt.rs at end of fit). Cells because all training is single-threaded.
-/// Per-phase wall-clock counters captured while training a single boosting
-/// iteration. Visible via `Config::verbose`.
+/// Cumulative per-phase wall-clock counters. `Cell` because training is
+/// single-threaded; this lets the buckets live behind a `&self` borrow.
 #[derive(Default)]
 pub struct TimingBuckets {
     pub hist_build: Cell<Duration>,
@@ -27,14 +25,14 @@ impl TimingBuckets {
     }
 }
 
-/// Encode a leaf index `idx` (>= 0) as a negative child pointer.
+/// Negative child pointers encode a leaf index as `!idx`. Non-negative is an
+/// internal-node index in `tree.nodes`.
 #[inline]
 fn encode_leaf(idx: usize) -> i32 {
     !(idx as i32)
 }
 
 struct LeafState {
-    /// Training row indices that fall into this leaf.
     indices: Vec<u32>,
     sum_grad: f64,
     sum_hess: f64,
@@ -42,7 +40,7 @@ struct LeafState {
     /// Histograms parallel to `feature_indices`.
     histograms: Vec<FeatureHistogram>,
     best_split: Option<SplitInfo>,
-    /// Parent internal-node index in `Tree.nodes`. -1 if this is the root leaf.
+    /// Parent internal-node index in `Tree.nodes`, or `-1` at the root.
     parent_node_idx: i32,
     is_left_child: bool,
 }
@@ -64,19 +62,22 @@ impl<'a> TreeLearner<'a> {
 
     /// Grow a single tree on the provided sample of rows and features.
     ///
-    /// `gradhess[row] = [grad, hess]` is the packed per-row gradient/hessian
-    /// pair (one 8-byte load = both values, halving gather pressure in the
-    /// histogram-build hot loop vs separate f32 arrays).
+    /// `gradhess[row] = [grad, hess]` is the packed gradient/hessian pair
+    /// (one 8-byte load = both values in the histogram hot loop).
     ///
-    /// Returns the tree plus a `row_to_leaf` map of length `dataset.n_rows()`:
-    /// for each row used in this tree, the index into `tree.leaf_values` of the
-    /// leaf it landed in. Rows not in `row_indices` are mapped to leaf 0 (which
-    /// is the root leaf; they receive the constant root prediction).
+    /// `is_full` must be `true` iff `row_indices == 0..dataset.n_rows()`; in
+    /// that case the root histograms use the sequential `_full` path instead
+    /// of the indices indirection.
+    ///
+    /// Returns the tree plus a `row_to_leaf` map of length `dataset.n_rows()`.
+    /// Rows absent from `row_indices` remain mapped to leaf 0 (the root
+    /// prediction).
     pub fn train_one_tree(
         &self,
         gradhess: &[[f32; 2]],
         row_indices: &[u32],
         feature_indices: &[usize],
+        is_full: bool,
     ) -> (Tree, Vec<u32>) {
         let mut tree = Tree {
             nodes: Vec::new(),
@@ -85,32 +86,15 @@ impl<'a> TreeLearner<'a> {
             leaf_values: Vec::new(),
         };
 
-        // Per-row current leaf index. Initially everyone is in leaf 0 (root).
         let mut row_to_leaf: Vec<u32> = vec![0u32; self.dataset.n_rows()];
 
-        // Whether `row_indices` is exactly 0..n_rows. In that case the
-        // histogram build over the full column is contiguous and we use the
-        // gather-free `build_full` path.
-        let full = row_indices.len() == self.dataset.n_rows() && {
-            let mut ok = true;
-            for (i, &r) in row_indices.iter().enumerate() {
-                if r as usize != i {
-                    ok = false;
-                    break;
-                }
-            }
-            ok
-        };
-
-        // Build root histograms in row-major batched form: each row reads
-        // gradhess once, then updates every feature's histogram in lockstep.
         let t0 = std::time::Instant::now();
         let mut root_histograms: Vec<FeatureHistogram> = feature_indices
             .iter()
             .map(|&feat| FeatureHistogram::zeros(self.dataset.bin_mapper(feat).num_bins()))
             .collect();
         with_columns!(self.dataset, feature_indices, |cols| {
-            if full {
+            if is_full {
                 build_histograms_batched_full(&cols, gradhess, &mut root_histograms);
             } else {
                 build_histograms_batched(&cols, row_indices, gradhess, &mut root_histograms);
@@ -128,8 +112,6 @@ impl<'a> TreeLearner<'a> {
             .sum();
         let root_count = row_indices.len() as u32;
 
-        // Allocate root leaf in tree.leaf_values; its value is set now and overwritten
-        // if/when it gets split (leaving a dead entry, which is fine).
         tree.leaf_values
             .push(self.compute_leaf_value(root_grad, root_hess));
 
@@ -146,8 +128,8 @@ impl<'a> TreeLearner<'a> {
 
         self.update_best_split(&mut leaves[0], feature_indices);
 
-        // Leaf-wise growth: at each step, split the leaf with the highest gain,
-        // until we reach `num_leaves` or no positive-gain split remains.
+        // Leaf-wise growth: at each step split the leaf with the highest gain,
+        // until `num_leaves` is reached or no positive-gain split remains.
         while leaves.len() < self.config.num_leaves {
             let best_idx = leaves
                 .iter()
@@ -161,10 +143,8 @@ impl<'a> TreeLearner<'a> {
             let parent = leaves.swap_remove(best_idx);
             let split = parent.best_split.clone().expect("checked above");
 
-            // Partition parent.indices into left/right based on the split.
-            // We know the exact left_count/right_count from the SplitInfo, so
-            // pre-size the Vecs and use unchecked writes to avoid the per-push
-            // capacity check + branch.
+            // Exact left/right counts come from SplitInfo, so pre-size the Vecs
+            // and use set_len to skip the per-push capacity check.
             let t_p = std::time::Instant::now();
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
@@ -181,7 +161,6 @@ impl<'a> TreeLearner<'a> {
             });
             TimingBuckets::add(&self.timing.partition, t_p.elapsed());
 
-            // Allocate two new leaf slots.
             let left_leaf_idx = tree.leaf_values.len();
             tree.leaf_values
                 .push(self.compute_leaf_value(split.left_sum_grad, split.left_sum_hess));
@@ -189,7 +168,6 @@ impl<'a> TreeLearner<'a> {
             tree.leaf_values
                 .push(self.compute_leaf_value(split.right_sum_grad, split.right_sum_hess));
 
-            // Update per-row leaf assignment for the rows we just partitioned.
             for &i in &left_indices {
                 row_to_leaf[i as usize] = left_leaf_idx as u32;
             }
@@ -197,9 +175,8 @@ impl<'a> TreeLearner<'a> {
                 row_to_leaf[i as usize] = right_leaf_idx as u32;
             }
 
-            // Append the new internal node. Threshold and gain go into the
-            // parallel `node_thresholds` / `node_gains` arrays so they stay
-            // out of the inference-hot `SplitNode` layout.
+            // Threshold and gain go into the parallel `node_thresholds` /
+            // `node_gains` arrays — kept off the inference-hot SplitNode.
             let new_node_idx = tree.nodes.len() as i32;
             tree.nodes.push(SplitNode {
                 feature: split.feature as u32,
@@ -211,7 +188,6 @@ impl<'a> TreeLearner<'a> {
             tree.node_thresholds.push(split.threshold_value);
             tree.node_gains.push(split.gain);
 
-            // Wire up the parent (if any) to point to this new internal node.
             if parent.parent_node_idx >= 0 {
                 let p = &mut tree.nodes[parent.parent_node_idx as usize];
                 if parent.is_left_child {
@@ -221,8 +197,9 @@ impl<'a> TreeLearner<'a> {
                 }
             }
 
-            // Decide which child to build histograms for directly (the smaller one)
-            // and derive the other by subtraction from the parent's histograms.
+            // Sibling-by-subtraction: build histograms directly for the smaller
+            // child and derive the larger via `parent - smaller`. Breaking this
+            // invariant doubles tree-build time.
             let build_left_first = left_indices.len() <= right_indices.len();
             let small_indices: &Vec<u32> = if build_left_first {
                 &left_indices
@@ -288,29 +265,21 @@ impl<'a> TreeLearner<'a> {
 
             leaves.push(left_leaf);
             leaves.push(right_leaf);
-
-            // If max_depth is set, prune leaves that can't grow further by clearing
-            // their best_split. (Simplified: we don't track depth precisely without
-            // walking the tree, so we skip this for now if max_depth < 0.)
         }
 
         (tree, row_to_leaf)
     }
 
-    /// Search all features for the best split of a leaf and store it.
     fn update_best_split(&self, leaf: &mut LeafState, feature_indices: &[usize]) {
         let t = std::time::Instant::now();
-        if (leaf.count as usize) < 2 * self.config.min_data_in_leaf {
+        if (leaf.count as usize) < 2 * self.config.min_data_in_leaf
+            || leaf.sum_hess < 2.0 * self.config.min_sum_hessian_in_leaf
+        {
             leaf.best_split = None;
             TimingBuckets::add(&self.timing.split_search, t.elapsed());
             return;
         }
-        if leaf.sum_hess < 2.0 * self.config.min_sum_hessian_in_leaf {
-            leaf.best_split = None;
-            TimingBuckets::add(&self.timing.split_search, t.elapsed());
-            return;
-        }
-        let best = feature_indices
+        leaf.best_split = feature_indices
             .iter()
             .enumerate()
             .filter_map(|(slot, &feat)| {
@@ -324,15 +293,7 @@ impl<'a> TreeLearner<'a> {
                     self.config,
                 )
             })
-            .fold(SplitInfo::dummy_worst(), |a, b| {
-                if a.gain >= b.gain { a } else { b }
-            });
-
-        leaf.best_split = if best.gain > f64::NEG_INFINITY {
-            Some(best)
-        } else {
-            None
-        };
+            .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap_or(std::cmp::Ordering::Equal));
         TimingBuckets::add(&self.timing.split_search, t.elapsed());
     }
 
@@ -347,31 +308,8 @@ impl<'a> TreeLearner<'a> {
     }
 }
 
-impl SplitInfo {
-    fn dummy_worst() -> Self {
-        Self {
-            feature: 0,
-            threshold_bin: 0,
-            threshold_value: 0.0,
-            missing_dir: MissingDir::Left,
-            gain: f64::NEG_INFINITY,
-            left_sum_grad: 0.0,
-            left_sum_hess: 0.0,
-            left_count: 0,
-            right_sum_grad: 0.0,
-            right_sum_hess: 0.0,
-            right_count: 0,
-        }
-    }
-}
-
-/// Split `parent_indices` into left/right partitions using a single feature
-/// column. Generic over the bin element type so the comparison happens in the
-/// column's native width (u8 vs u16) — avoids widening every element to u16.
-///
-/// SAFETY: `feat_col.len()` must be at least `max(parent_indices) + 1`, and
-/// `left_out`/`right_out` must have capacity for the (caller-known) exact
-/// left/right counts derived from the SplitInfo.
+/// Split `parent_indices` into left/right partitions using one feature column.
+/// Generic over `B: Bin` so the comparison stays in the column's native width.
 fn partition_indices<B: Bin>(
     feat_col: &[B],
     parent_indices: &[u32],
@@ -382,6 +320,9 @@ fn partition_indices<B: Bin>(
 ) {
     let threshold = B::from_u16(threshold_bin);
     let n_parent = parent_indices.len();
+    // SAFETY: caller pre-sized left_out/right_out to the exact split counts,
+    // and feat_col covers every row index in parent_indices (DatasetBuilder
+    // invariant).
     unsafe {
         let lp = left_out.as_mut_ptr();
         let rp = right_out.as_mut_ptr();

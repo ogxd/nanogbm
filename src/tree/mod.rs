@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub use learner::TreeLearner;
 
-/// Direction the missing values go on a split. `#[repr(u8)]` so it occupies
-/// exactly one byte inside [`SplitNode`].
+/// `#[repr(u8)]` keeps the field at one byte inside [`SplitNode`].
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MissingDir {
@@ -15,9 +14,7 @@ pub enum MissingDir {
     Right = 1,
 }
 
-/// A single internal split node in a tree, **inference-tight**.
-///
-/// Layout (16 bytes, 4 nodes per cache line on x86-64 / aarch64):
+/// Inference-tight split node. 16 bytes — 4 per cache line:
 /// ```text
 ///   feature       u32  (4 bytes)
 ///   threshold_bin u16  (2 bytes)
@@ -26,39 +23,28 @@ pub enum MissingDir {
 ///   left_child    i32  (4 bytes)
 ///   right_child   i32  (4 bytes)
 /// ```
-///
-/// The f64 raw `threshold` and the f64 `gain` used to live here but they're
-/// only read by the raw-features predict path and the feature-importance
-/// reporter respectively. Moving them to parallel arrays on [`Tree`] shrinks
-/// this struct from ~40 to 16 bytes — 2-3× more nodes per cache line during
-/// inference, which is the single biggest win for `predict_*_binned` and
-/// `predict_*_on_dataset` on large eval batches.
+/// `threshold` (f64) and `gain` (f64) live on parallel arrays on [`Tree`]
+/// because only the raw-f64 predict path and feature-importance reporter
+/// read them; keeping them off the hot node fits 4× more nodes per line.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SplitNode {
     pub feature: u32,
-    /// Inclusive upper bound for the "left" branch in bin-code space.
+    /// Inclusive upper bound for the left branch in bin-code space.
     pub threshold_bin: u16,
     pub missing_dir: MissingDir,
-    /// negative = leaf index (`!leaf_idx`), positive = internal node index.
+    /// Negative encodes a leaf index as `!idx`; non-negative is an
+    /// internal-node index.
     pub left_child: i32,
     pub right_child: i32,
 }
 
-/// A trained tree: collection of internal nodes + leaf values.
-///
-/// `node_thresholds` and `node_gains` are parallel arrays to `nodes` (same
-/// length). They're kept off the inference-hot [`SplitNode`] because only
-/// [`Tree::predict_raw`] reads `threshold`, and only
-/// [`crate::Model::feature_importance_gain`] reads `gain`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
     pub nodes: Vec<SplitNode>,
-    /// Per-node raw-value threshold (parallel to `nodes`). Read only by
-    /// [`Tree::predict_raw`]; the binned paths don't touch it.
+    /// Parallel to `nodes`. Read only by [`Tree::predict_raw`].
     pub node_thresholds: Vec<f64>,
-    /// Per-node split gain (parallel to `nodes`). Read only by
-    /// feature-importance reporting.
+    /// Parallel to `nodes`. Read only by feature-importance reporting.
     pub node_gains: Vec<f64>,
     pub leaf_values: Vec<f64>,
 }
@@ -111,14 +97,9 @@ impl Tree {
         with_columns!(dataset, feats, |cols| { self.predict_on_columns(&cols, row) })
     }
 
-    /// Predict for one row given pre-collected column slices. Generic over the
-    /// bin element type so the per-node comparison happens in the column's
-    /// native width (u8 vs u16) — no per-node enum match, no per-element
-    /// widening to u16.
-    ///
-    /// Hot path: callers (`predict_*_on_dataset`) collect `&[&[B]]` once per
-    /// batch and reuse it across every row × tree, paying the dispatch cost
-    /// once instead of per node visit.
+    /// Predict for one row from pre-collected column slices. Generic over
+    /// `B: Bin` so the per-node comparison stays in the column's native
+    /// width.
     #[inline]
     pub fn predict_on_columns<B: crate::dataset::Bin>(
         &self,
@@ -129,11 +110,9 @@ impl Tree {
             return self.leaf_values[0];
         }
         let mut node_idx: i32 = 0;
-        // SAFETY: node_idx is bootstrapped at 0 and only updated via
-        // `left_child` / `right_child` values that the learner emits as valid
-        // indices into `self.nodes` (or negative leaf encodings). `columns`
-        // has one entry per dataset feature and each is long enough to cover
-        // `row` (DatasetBuilder invariant).
+        // SAFETY: child pointers come from the learner and address either a
+        // valid node index or an encoded leaf. Column lengths cover `row` by
+        // DatasetBuilder invariant.
         unsafe {
             loop {
                 let node = self.nodes.get_unchecked(node_idx as usize);
