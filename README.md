@@ -37,6 +37,12 @@ linking C++ through an FFI shim. `cargo build` and that's it.
 
 Performance-wise, nanogbm is supposed to be as fast, if not faster, than LightGBM, thanks to optimizations tailored to the GBDT + histogram learner + binary logistic loss subset.
 
+|          | Language | Speed | Features | Lines of code |
+|----------|----------|-------|----------|---------------|
+| nanogbm  | Rust     | ⭐⭐⭐ | ⭐       | ~2k           |
+| [lightgbm](https://github.com/microsoft/LightGBM) | C++      | ⭐⭐   | ⭐⭐⭐   | ~80k          |
+| [xgboost](https://github.com/dmlc/xgboost)  | C++      | ⭐    | ⭐⭐⭐   | ~100k         |
+
 ## What's actually in the box
 
 - **GBDT.** Trees built one at a time, each one fitting the gradient of the
