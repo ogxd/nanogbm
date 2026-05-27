@@ -3,7 +3,7 @@
 //!
 //! Run with: `cargo run --release --example early_stopping`
 
-use nanogbm::metric::{BinaryLogloss, Metric};
+use nanogbm::loss::binary_logloss;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
 
 fn make_data(n: usize, d: usize, seed: u64) -> (Vec<f64>, Vec<f32>) {
@@ -51,6 +51,6 @@ fn main() {
     let model = GbdtTrainer::new(&cfg).fit(&train, Some(&valid)).unwrap();
 
     let scores = model.predict_raw_scores(&vx, 1000);
-    let logloss = BinaryLogloss.evaluate(&scores, &vy);
+    let logloss = binary_logloss(&scores, &vy);
     println!("trees={} valid_logloss={logloss:.5}", model.n_trees());
 }

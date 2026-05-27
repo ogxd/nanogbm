@@ -12,7 +12,7 @@ use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
 use nanogbm::dataset::{BinMapper, Dataset, DatasetBuilder};
-use nanogbm::objective::{BinaryObjective, Objective};
+use nanogbm::loss;
 use nanogbm::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
@@ -72,14 +72,14 @@ fn build_fixture(seed: u64) -> Fixture {
 
     // Realistic raw_scores: not all zero (would skew sigmoid). Use a small
     // dispersion around the init log-odds.
-    let init = BinaryObjective.init_score(&labels);
+    let init = loss::init_score(&labels);
     let raw_scores: Vec<f64> = (0..N_ROWS)
         .map(|_| init + rng.gen_range(-0.5..0.5))
         .collect();
 
     // Compute initial gradhess.
     let mut gradhess = vec![[0.0f32; 2]; N_ROWS];
-    BinaryObjective.gradients_packed(&raw_scores, &labels, &mut gradhess);
+    loss::gradients_packed(&raw_scores, &labels, &mut gradhess);
 
     // 50% subsample of indices, sorted.
     let mut indices: Vec<u32> = (0..N_ROWS as u32).collect();
@@ -101,12 +101,11 @@ fn bench_gradients(c: &mut Criterion, fx: &Fixture) {
     let mut group = c.benchmark_group("gradients");
     group.throughput(Throughput::Elements(N_ROWS as u64));
 
-    let obj = BinaryObjective;
     let mut out = vec![[0.0f32; 2]; N_ROWS];
 
     group.bench_function("gradients_packed", |b| {
         b.iter(|| {
-            obj.gradients_packed(
+            loss::gradients_packed(
                 black_box(&fx.raw_scores),
                 black_box(&fx.labels),
                 black_box(&mut out),

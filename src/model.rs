@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Bin, BinData, BinMapper, BinWidth, Dataset};
 use crate::error::{Error, Result};
-use crate::objective::binary::sigmoid;
+use crate::loss::sigmoid;
 use crate::tree::Tree;
 
 /// A trained GBDT model: ensemble of trees plus boosting metadata.

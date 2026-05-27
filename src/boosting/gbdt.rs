@@ -5,9 +5,8 @@ use rand_chacha::ChaCha8Rng;
 use crate::config::Config;
 use crate::dataset::Dataset;
 use crate::error::Result;
-use crate::metric::{BinaryLogloss, Metric};
+use crate::loss;
 use crate::model::Model;
-use crate::objective::{BinaryObjective, Objective};
 use crate::tree::TreeLearner;
 use crate::tree::learner::TimingBuckets;
 
@@ -24,12 +23,10 @@ impl<'a> GbdtTrainer<'a> {
     /// each iteration and apply early stopping (if configured).
     pub fn fit(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
         self.config.validate()?;
-        let objective = BinaryObjective::default();
-        let metric = BinaryLogloss;
 
         let n = train.n_rows();
         let n_features = train.n_features();
-        let init_score = objective.init_score(train.labels());
+        let init_score = loss::init_score(train.labels());
 
         let mut raw_scores = vec![init_score; n];
         // Packed [grad, hess] pairs — one 8-byte load per row in the histogram
@@ -55,7 +52,7 @@ impl<'a> GbdtTrainer<'a> {
         for iter in 0..self.config.num_iterations {
             let t0 = std::time::Instant::now();
             // Gradients/hessians from current raw scores, packed.
-            objective.gradients_packed(&raw_scores, train.labels(), &mut gradhess);
+            loss::gradients_packed(&raw_scores, train.labels(), &mut gradhess);
             t_gradients += t0.elapsed();
 
             // Row bagging.
@@ -108,9 +105,9 @@ impl<'a> GbdtTrainer<'a> {
                 vrs.iter_mut().enumerate().for_each(|(row, s)| {
                     *s += lr * tree.predict_on_dataset(v, row);
                 });
-                let score = metric.evaluate(vrs, v.labels());
+                let score = loss::binary_logloss(vrs, v.labels());
                 if self.config.verbose {
-                    eprintln!("[{}] {} = {:.6}", iter + 1, metric.name(), score);
+                    eprintln!("[{}] binary_logloss = {:.6}", iter + 1, score);
                 }
                 if score + 1e-12 < best_score {
                     best_score = score;
@@ -129,13 +126,8 @@ impl<'a> GbdtTrainer<'a> {
                 }
             } else {
                 if self.config.verbose {
-                    let train_score = metric.evaluate(&raw_scores, train.labels());
-                    eprintln!(
-                        "[{}] train {} = {:.6}",
-                        iter + 1,
-                        metric.name(),
-                        train_score
-                    );
+                    let train_score = loss::binary_logloss(&raw_scores, train.labels());
+                    eprintln!("[{}] train binary_logloss = {:.6}", iter + 1, train_score);
                 }
                 trees.push(tree);
             }

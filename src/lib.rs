@@ -41,9 +41,8 @@ pub mod boosting;
 pub mod config;
 pub mod dataset;
 pub mod error;
-pub mod metric;
+pub mod loss;
 pub mod model;
-pub mod objective;
 pub mod tree;
 
 pub use boosting::GbdtTrainer;

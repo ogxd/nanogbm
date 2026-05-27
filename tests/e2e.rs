@@ -1,4 +1,4 @@
-use nanogbm::metric::{BinaryLogloss, Metric};
+use nanogbm::loss::binary_logloss;
 use nanogbm::{Config, DatasetBuilder, GbdtTrainer, Model};
 use rand::SeedableRng;
 use rand::prelude::*;
@@ -64,12 +64,11 @@ fn trains_and_reduces_logloss_on_synthetic() {
     assert!(model.n_trees() > 0);
 
     // Compare logloss of init prediction vs. trained model on validation set.
-    let metric = BinaryLogloss;
     let init_only_scores = vec![model.init_score(); n_valid];
-    let init_loss = metric.evaluate(&init_only_scores, &valid_y);
+    let init_loss = binary_logloss(&init_only_scores, &valid_y);
 
     let final_scores = model.predict_raw_scores(&valid_x, n_valid);
-    let final_loss = metric.evaluate(&final_scores, &valid_y);
+    let final_loss = binary_logloss(&final_scores, &valid_y);
 
     println!("init_loss={init_loss:.5} final_loss={final_loss:.5}");
     assert!(
