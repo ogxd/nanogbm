@@ -102,28 +102,13 @@ impl Tree {
         }
     }
 
-    /// Predict for one row of a column-major bin-encoded dataset, by walking
-    /// the tree and indexing into per-feature columns. Convenience wrapper
-    /// around [`Tree::predict_on_columns`] — does an enum match on
-    /// `dataset.bin_data` per call (acceptable for one-shot use; for batch
-    /// predict the [`crate::Model::predict_*_on_dataset`] paths hoist this
-    /// match out of the per-node loop).
+    /// Predict for one row of a column-major bin-encoded dataset. The bin-width
+    /// dispatch happens per call — fine for one-shot use, but batch paths
+    /// (`Model::predict_*_on_dataset`) hoist it out of the row loop.
     pub fn predict_on_dataset(&self, dataset: &crate::dataset::Dataset, row: usize) -> f64 {
-        use crate::dataset::BinWidth;
-        match dataset.bin_width() {
-            BinWidth::U8 => {
-                let cols: Vec<&[u8]> = (0..dataset.n_features())
-                    .map(|f| dataset.feature_column_u8(f))
-                    .collect();
-                self.predict_on_columns(&cols, row)
-            }
-            BinWidth::U16 => {
-                let cols: Vec<&[u16]> = (0..dataset.n_features())
-                    .map(|f| dataset.feature_column_u16(f))
-                    .collect();
-                self.predict_on_columns(&cols, row)
-            }
-        }
+        use crate::dataset::with_columns;
+        let feats: Vec<usize> = (0..dataset.n_features()).collect();
+        with_columns!(dataset, feats, |cols| { self.predict_on_columns(&cols, row) })
     }
 
     /// Predict for one row given pre-collected column slices. Generic over the

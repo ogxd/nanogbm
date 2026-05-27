@@ -152,3 +152,44 @@ impl Dataset {
         &self.bin_mappers
     }
 }
+
+/// Run `$body` once per dataset bin width with `$cols` bound to a
+/// `Vec<&[u8]>` or `Vec<&[u16]>` containing the requested feature columns.
+///
+/// Centralizes the u8/u16 match so callers don't duplicate the dispatch
+/// arms. The body is monomorphized per width by the compiler.
+macro_rules! with_columns {
+    ($ds:expr, $feats:expr, |$cols:ident| $body:block) => {
+        match $ds.bin_width() {
+            $crate::dataset::BinWidth::U8 => {
+                let $cols: Vec<&[u8]> =
+                    $feats.iter().map(|&f| $ds.feature_column_u8(f)).collect();
+                $body
+            }
+            $crate::dataset::BinWidth::U16 => {
+                let $cols: Vec<&[u16]> =
+                    $feats.iter().map(|&f| $ds.feature_column_u16(f)).collect();
+                $body
+            }
+        }
+    };
+}
+
+/// Single-column counterpart to [`with_columns!`].
+macro_rules! with_column {
+    ($ds:expr, $feat:expr, |$col:ident| $body:block) => {
+        match $ds.bin_width() {
+            $crate::dataset::BinWidth::U8 => {
+                let $col: &[u8] = $ds.feature_column_u8($feat);
+                $body
+            }
+            $crate::dataset::BinWidth::U16 => {
+                let $col: &[u16] = $ds.feature_column_u16($feat);
+                $body
+            }
+        }
+    };
+}
+
+pub(crate) use with_column;
+pub(crate) use with_columns;

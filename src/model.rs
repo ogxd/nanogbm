@@ -5,7 +5,7 @@ use std::path::Path;
 use bincode::config::standard;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{Bin, BinData, BinMapper, BinWidth, Dataset};
+use crate::dataset::{Bin, BinData, BinMapper, BinWidth, Dataset, with_columns};
 use crate::error::{Error, Result};
 use crate::loss::sigmoid;
 use crate::tree::Tree;
@@ -146,20 +146,10 @@ impl Model {
     pub fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let n = dataset.n_rows();
         let mut scores = vec![self.init_score; n];
-        match dataset.bin_width() {
-            crate::dataset::BinWidth::U8 => {
-                let cols: Vec<&[u8]> = (0..dataset.n_features())
-                    .map(|f| dataset.feature_column_u8(f))
-                    .collect();
-                self.predict_into_with_columns(&cols, n, &mut scores);
-            }
-            crate::dataset::BinWidth::U16 => {
-                let cols: Vec<&[u16]> = (0..dataset.n_features())
-                    .map(|f| dataset.feature_column_u16(f))
-                    .collect();
-                self.predict_into_with_columns(&cols, n, &mut scores);
-            }
-        }
+        let feats: Vec<usize> = (0..dataset.n_features()).collect();
+        with_columns!(dataset, feats, |cols| {
+            self.predict_into_with_columns(&cols, n, &mut scores);
+        });
         scores
     }
 

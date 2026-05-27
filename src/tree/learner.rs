@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::dataset::{Bin, BinWidth, Dataset};
+use crate::dataset::{Bin, Dataset, with_column, with_columns};
 use crate::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
@@ -102,49 +102,20 @@ impl<'a> TreeLearner<'a> {
             ok
         };
 
-        // Build root histograms over features (row-major batched: each row
-        // touches gradhess once, then updates every feature's histogram in
-        // lockstep). Dispatch on the dataset's bin width so the inner loop is
-        // type-stable (u8 vs u16) without per-element widening.
+        // Build root histograms in row-major batched form: each row reads
+        // gradhess once, then updates every feature's histogram in lockstep.
         let t0 = std::time::Instant::now();
         let mut root_histograms: Vec<FeatureHistogram> = feature_indices
             .iter()
             .map(|&feat| FeatureHistogram::zeros(self.dataset.bin_mapper(feat).num_bins()))
             .collect();
-        match self.dataset.bin_width() {
-            BinWidth::U8 => {
-                let root_columns: Vec<&[u8]> = feature_indices
-                    .iter()
-                    .map(|&feat| self.dataset.feature_column_u8(feat))
-                    .collect();
-                if full {
-                    build_histograms_batched_full(&root_columns, gradhess, &mut root_histograms);
-                } else {
-                    build_histograms_batched(
-                        &root_columns,
-                        row_indices,
-                        gradhess,
-                        &mut root_histograms,
-                    );
-                }
+        with_columns!(self.dataset, feature_indices, |cols| {
+            if full {
+                build_histograms_batched_full(&cols, gradhess, &mut root_histograms);
+            } else {
+                build_histograms_batched(&cols, row_indices, gradhess, &mut root_histograms);
             }
-            BinWidth::U16 => {
-                let root_columns: Vec<&[u16]> = feature_indices
-                    .iter()
-                    .map(|&feat| self.dataset.feature_column_u16(feat))
-                    .collect();
-                if full {
-                    build_histograms_batched_full(&root_columns, gradhess, &mut root_histograms);
-                } else {
-                    build_histograms_batched(
-                        &root_columns,
-                        row_indices,
-                        gradhess,
-                        &mut root_histograms,
-                    );
-                }
-            }
-        }
+        });
         TimingBuckets::add(&self.timing.hist_build, t0.elapsed());
 
         let root_grad: f64 = row_indices
@@ -198,24 +169,16 @@ impl<'a> TreeLearner<'a> {
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
             let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
-            match self.dataset.bin_width() {
-                BinWidth::U8 => partition_indices::<u8>(
-                    self.dataset.feature_column_u8(split.feature),
+            with_column!(self.dataset, split.feature, |col| {
+                partition_indices(
+                    col,
                     &parent.indices,
                     split.threshold_bin,
                     missing_goes_left,
                     &mut left_indices,
                     &mut right_indices,
-                ),
-                BinWidth::U16 => partition_indices::<u16>(
-                    self.dataset.feature_column_u16(split.feature),
-                    &parent.indices,
-                    split.threshold_bin,
-                    missing_goes_left,
-                    &mut left_indices,
-                    &mut right_indices,
-                ),
-            }
+                );
+            });
             TimingBuckets::add(&self.timing.partition, t_p.elapsed());
 
             // Allocate two new leaf slots.
@@ -273,22 +236,9 @@ impl<'a> TreeLearner<'a> {
                 .enumerate()
                 .map(|(slot, _)| FeatureHistogram::zeros(parent.histograms[slot].num_bins()))
                 .collect();
-            match self.dataset.bin_width() {
-                BinWidth::U8 => {
-                    let cols: Vec<&[u8]> = feature_indices
-                        .iter()
-                        .map(|&feat| self.dataset.feature_column_u8(feat))
-                        .collect();
-                    build_histograms_batched(&cols, small_indices, gradhess, &mut small_hists);
-                }
-                BinWidth::U16 => {
-                    let cols: Vec<&[u16]> = feature_indices
-                        .iter()
-                        .map(|&feat| self.dataset.feature_column_u16(feat))
-                        .collect();
-                    build_histograms_batched(&cols, small_indices, gradhess, &mut small_hists);
-                }
-            }
+            with_columns!(self.dataset, feature_indices, |cols| {
+                build_histograms_batched(&cols, small_indices, gradhess, &mut small_hists);
+            });
             TimingBuckets::add(&self.timing.hist_build, t_h.elapsed());
 
             let t_s = std::time::Instant::now();
