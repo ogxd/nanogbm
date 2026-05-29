@@ -74,18 +74,35 @@ impl<T> FeatureBuilder<T> {
         self
     }
 
-    pub fn add_hash<H: Hash + 'static>(
+    pub fn add_boolean(
+        mut self,
+        name: impl Into<String>,
+        extract: impl Fn(&T) -> bool + 'static,
+    ) -> Self {
+        self.features.push(Feature {
+            name: name.into(),
+            max_bin: None,
+            extract: Box::new(move |r| if extract(r) { 1.0 } else { 0.0 }),
+        });
+        self
+    }
+
+    pub fn add_float(self, name: impl Into<String>, extract: impl Fn(&T) -> f64 + 'static) -> Self {
+        self.add(name, None, extract)
+    }
+
+    pub fn add_hash<H: Hash>(
         mut self,
         name: impl Into<String>,
         max_bin: Option<usize>,
-        extract: impl Fn(&T) -> H,
+        extract: impl Fn(&T) -> H + 'static,
     ) -> Self {
         self.features.push(Feature {
             name: name.into(),
             max_bin,
             extract: Box::new(move |r| {
                 let h = extract(r);
-                let h = gxhash::GxBuildHasher::default().hash_one(&h);
+                let h = gxhash::GxBuildHasher::with_seed(42).hash_one(&h);
                 f64::from_bits(h)
             }),
         });
