@@ -1,8 +1,20 @@
 use nanogbm::loss::binary_logloss;
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer, Model};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer, Model};
 use rand::SeedableRng;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
+
+/// A training row is just a vector of `d` feature values.
+type Row = Vec<f64>;
+
+/// Build a `FeatureBuilder` with `d` numeric features indexing into a `Row`.
+fn feature_builder(d: usize) -> FeatureBuilder<Row> {
+    let mut fb = FeatureBuilder::<Row>::new();
+    for j in 0..d {
+        fb = fb.add(format!("f{j}"), None, move |r: &Row| r[j]);
+    }
+    fb
+}
 
 /// Generate a noisy linearly-separable binary classification problem. `train_n` rows
 /// for training, `valid_n` for validation, with the same underlying weights/bias.
@@ -11,25 +23,27 @@ fn make_classification(
     valid_n: usize,
     d: usize,
     seed: u64,
-) -> (Vec<f64>, Vec<f32>, Vec<f64>, Vec<f32>) {
+) -> (Vec<Row>, Vec<f32>, Vec<Row>, Vec<f32>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let weights: Vec<f64> = (0..d).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let bias: f64 = rng.gen_range(-0.5..0.5);
-    let mut sample = |n: usize| -> (Vec<f64>, Vec<f32>) {
-        let mut features = vec![0.0; n * d];
+    let mut sample = |n: usize| -> (Vec<Row>, Vec<f32>) {
+        let mut rows = Vec::with_capacity(n);
         let mut labels = vec![0f32; n];
-        for i in 0..n {
+        for label in labels.iter_mut() {
             let mut z = bias;
+            let mut row = vec![0.0; d];
             for j in 0..d {
                 let x: f64 = rng.gen_range(-3.0..3.0);
-                features[i * d + j] = x;
+                row[j] = x;
                 z += weights[j] * x;
             }
             z += rng.gen_range(-0.4..0.4);
             let p = 1.0 / (1.0 + (-z).exp());
-            labels[i] = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+            *label = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+            rows.push(row);
         }
-        (features, labels)
+        (rows, labels)
     };
     let (tx, ty) = sample(train_n);
     let (vx, vy) = sample(valid_n);
@@ -55,10 +69,9 @@ fn trains_and_reduces_logloss_on_synthetic() {
     cfg.early_stopping_round = 20;
     cfg.seed = 0;
 
-    let train_ds = DatasetBuilder::from_rows(&train_x, n_train, d, &train_y, &cfg).unwrap();
-    let valid_ds = DatasetBuilder::from_rows(&valid_x, n_valid, d, &valid_y, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg)
-        .fit(&train_ds, Some(&valid_ds))
+    let fb = feature_builder(d);
+    let model = GbdtTrainer::new(&cfg, &fb)
+        .fit(&train_x, &train_y, Some((&valid_x, &valid_y)))
         .unwrap();
 
     assert!(model.n_trees() > 0);
@@ -67,7 +80,7 @@ fn trains_and_reduces_logloss_on_synthetic() {
     let init_only_scores = vec![model.init_score(); n_valid];
     let init_loss = binary_logloss(&init_only_scores, &valid_y);
 
-    let final_scores = model.predict_raw_scores(&valid_x, n_valid);
+    let final_scores = model.predict_raw_scores(&fb, &valid_x);
     let final_loss = binary_logloss(&final_scores, &valid_y);
 
     println!("init_loss={init_loss:.5} final_loss={final_loss:.5}");
@@ -88,15 +101,15 @@ fn saved_model_round_trip_matches_predictions() {
     cfg.num_leaves = 15;
     cfg.min_data_in_leaf = 10;
     cfg.max_bin = 32;
-    let ds = DatasetBuilder::from_rows(&x, n, d, &y, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
+    let fb = feature_builder(d);
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&x, &y, None).unwrap();
 
     let tmp = std::env::temp_dir().join("nanogbm_model.bin");
     model.save(&tmp).unwrap();
     let loaded = Model::load(&tmp).unwrap();
 
-    let p1 = model.predict_proba(&x, n);
-    let p2 = loaded.predict_proba(&x, n);
+    let p1 = model.predict_proba(&fb, &x);
+    let p2 = loaded.predict_proba(&fb, &x);
     for (a, b) in p1.iter().zip(p2.iter()) {
         assert!((a - b).abs() < 1e-12);
     }
@@ -113,11 +126,11 @@ fn predict_bin_and_raw_paths_agree() {
     cfg.num_leaves = 11;
     cfg.min_data_in_leaf = 5;
     cfg.max_bin = 32;
-    let ds = DatasetBuilder::from_rows(&x, n, d, &y, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
+    let fb = feature_builder(d);
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&x, &y, None).unwrap();
 
-    let raw = model.predict_raw_scores(&x, n);
-    let bin_raw = model.predict_raw_scores_on_dataset(&ds);
+    let raw = model.predict_raw_scores(&fb, &x);
+    let bin_raw = model.predict_raw_scores_binned(&fb, &x);
 
     let max_abs = raw
         .iter()
@@ -148,21 +161,18 @@ fn predict_proba_binned_matches_raw_proba() {
     cfg.max_bin = 64;
     cfg.lambda_l2 = 0.5;
 
-    let train_ds = DatasetBuilder::from_rows(&tx, n_train, d, &ty, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&train_ds, None).unwrap();
+    let fb = feature_builder(d);
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&tx, &ty, None).unwrap();
 
-    let raw_proba = model.predict_proba(&ex, n_eval);
-    let binned_proba = model.predict_proba_binned(&ex, n_eval);
+    let raw_proba = model.predict_proba(&fb, &ex);
+    let binned_proba = model.predict_proba_binned(&fb, &ex);
 
     let max_abs = raw_proba
         .iter()
         .zip(binned_proba.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
-    assert!(
-        max_abs < 1e-9,
-        "raw vs binned proba diverged by {max_abs}"
-    );
+    assert!(max_abs < 1e-9, "raw vs binned proba diverged by {max_abs}");
 }
 
 #[test]
@@ -177,15 +187,15 @@ fn binned_predict_survives_bincode_round_trip() {
     cfg.num_leaves = 15;
     cfg.min_data_in_leaf = 10;
     cfg.max_bin = 48;
-    let ds = DatasetBuilder::from_rows(&x, n, d, &y, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
+    let fb = feature_builder(d);
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&x, &y, None).unwrap();
 
     let tmp = std::env::temp_dir().join("nanogbm_model_binned.bin");
     model.save(&tmp).unwrap();
     let loaded = Model::load(&tmp).unwrap();
 
-    let before = model.predict_proba_binned(&ex, n / 2);
-    let after = loaded.predict_proba_binned(&ex, n / 2);
+    let before = model.predict_proba_binned(&fb, &ex);
+    let after = loaded.predict_proba_binned(&fb, &ex);
     for (a, b) in before.iter().zip(after.iter()) {
         assert!((a - b).abs() < 1e-12);
     }

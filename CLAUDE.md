@@ -26,7 +26,9 @@ Always prefer `--release` — debug builds of the training loop are orders of ma
 ## Workspace layout
 
 Single crate:
-- `nanogbm/` — the library. Public re-exports from `lib.rs`: `Config`, `Dataset`, `DatasetBuilder`, `GbdtTrainer`, `Model`, `Error`, `Result`, plus the `predict` module.
+- `nanogbm/` — the library. Public re-exports from `lib.rs`: `Config`, `Dataset`, `FeatureBuilder`, `GbdtTrainer`, `Model`, `Error`, `Result`.
+
+The public entry point is `FeatureBuilder<T>`: you declare each feature as `(name, optional max_bin, closure: Fn(&T) -> f64)` over your own row type. `GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, valid)` extracts + bins via the builder and trains; `Model::predict_*(&fb, &rows)` re-extracts through the *same* builder (closures aren't serializable — the model only stores bin mappers and feature names). `Dataset` is the internal binned matrix, built by `FeatureBuilder::build_dataset`; there is no longer a `DatasetBuilder`.
 
 Workspace deps: `serde`, `bincode` v2 (with the `serde` feature), `rand` + `rand_chacha`, `thiserror`. No `rayon`, no math crates — everything is hand-rolled.
 

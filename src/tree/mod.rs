@@ -112,7 +112,7 @@ impl Tree {
         let mut node_idx: i32 = 0;
         // SAFETY: child pointers come from the learner and address either a
         // valid node index or an encoded leaf. Column lengths cover `row` by
-        // DatasetBuilder invariant.
+        // dataset builder invariant.
         unsafe {
             loop {
                 let node = self.nodes.get_unchecked(node_idx as usize);

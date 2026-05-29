@@ -5,13 +5,16 @@
 //!
 //! # Quickstart
 //!
-//! ```no_run
-//! use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+//! Declare your features as named closures over your own row type, then train
+//! and predict by handing the same [`FeatureBuilder`] to both sides.
 //!
-//! # let n_rows = 1000usize;
-//! # let n_features = 5usize;
-//! # let features: Vec<f64> = vec![0.0; n_rows * n_features];
-//! # let labels: Vec<f32> = vec![0.0; n_rows];
+//! ```no_run
+//! use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
+//!
+//! struct Row { age: f64, income: f64, active: bool }
+//! # let rows: Vec<Row> = Vec::new();
+//! # let labels: Vec<f32> = Vec::new();
+//!
 //! let cfg = Config {
 //!     num_iterations: 100,
 //!     learning_rate: 0.1,
@@ -19,9 +22,13 @@
 //!     ..Config::default()
 //! };
 //!
-//! let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg)?;
-//! let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
-//! let probs = model.predict_proba(&features, n_rows);
+//! let fb = FeatureBuilder::<Row>::new()
+//!     .add("age", None, |r| r.age)
+//!     .add("income", Some(128), |r| r.income)
+//!     .add("active", None, |r| if r.active { 1.0 } else { 0.0 });
+//!
+//! let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None)?;
+//! let probs = model.predict_proba(&fb, &rows);
 //! # Ok::<(), nanogbm::Error>(())
 //! ```
 //!
@@ -48,6 +55,7 @@ pub mod tree;
 
 pub use boosting::GbdtTrainer;
 pub use config::Config;
-pub use dataset::{Dataset, DatasetBuilder};
+pub use dataset::Dataset;
 pub use error::{Error, Result};
+pub use feature::FeatureBuilder;
 pub use model::Model;

@@ -5,24 +5,46 @@ use rand_chacha::ChaCha8Rng;
 use crate::config::Config;
 use crate::dataset::Dataset;
 use crate::error::Result;
+use crate::feature::FeatureBuilder;
 use crate::loss;
 use crate::model::Model;
 use crate::tree::TreeLearner;
 use crate::tree::learner::TimingBuckets;
 
-pub struct GbdtTrainer<'a> {
+/// Trains a GBDT model from a [`Config`] and a [`FeatureBuilder<T>`]. The
+/// builder declares how each feature column is pulled from your row type `T`;
+/// [`fit`](Self::fit) takes the rows and labels directly and bins internally.
+pub struct GbdtTrainer<'a, T> {
     config: &'a Config,
+    features: &'a FeatureBuilder<T>,
 }
 
-impl<'a> GbdtTrainer<'a> {
-    pub fn new(config: &'a Config) -> Self {
-        Self { config }
+impl<'a, T> GbdtTrainer<'a, T> {
+    pub fn new(config: &'a Config, features: &'a FeatureBuilder<T>) -> Self {
+        Self { config, features }
     }
 
-    /// Train a GBDT model. If `valid` is provided, evaluate `binary_logloss`
-    /// after each iteration and apply early stopping (if configured).
-    pub fn fit(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
+    /// Train a GBDT model on `rows`/`labels`. Features are extracted and binned
+    /// via the [`FeatureBuilder`]. If `valid` is provided (its own rows +
+    /// labels), evaluate `binary_logloss` after each iteration and apply early
+    /// stopping (if configured).
+    pub fn fit(
+        &self,
+        rows: &[T],
+        labels: &[f32],
+        valid: Option<(&[T], &[f32])>,
+    ) -> Result<Model> {
         self.config.validate()?;
+        let train = self.features.build_dataset(rows, labels, self.config)?;
+        let valid_ds = match valid {
+            Some((vr, vl)) => Some(self.features.build_dataset(vr, vl, self.config)?),
+            None => None,
+        };
+        self.fit_dataset(&train, valid_ds.as_ref())
+    }
+
+    /// Core boosting loop over already-binned datasets.
+    fn fit_dataset(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
 
         let n = train.n_rows();
         let n_features = train.n_features();
@@ -155,6 +177,7 @@ impl<'a> GbdtTrainer<'a> {
             init_score,
             learning_rate: self.config.learning_rate,
             n_features,
+            feature_names: self.features.names().map(String::from).collect(),
             bin_mappers: train.bin_mappers().to_vec(),
             trees,
         })

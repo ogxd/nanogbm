@@ -4,13 +4,15 @@
 //!
 //! Run with: `cargo run --release --example missing_and_importance`
 
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
+
+struct Row {
+    f: [f64; 6],
+}
 
 fn main() {
     let n = 2000;
     let d = 6;
-    let mut features = vec![0.0f64; n * d];
-    let mut labels = vec![0f32; n];
     let mut s: u64 = 0xABCDEF;
     let mut rand = || {
         s ^= s << 13;
@@ -20,20 +22,24 @@ fn main() {
     };
 
     // Only features 0 and 2 are predictive. The rest are noise.
+    let mut rows = Vec::with_capacity(n);
+    let mut labels = vec![0f32; n];
     for i in 0..n {
-        for j in 0..d {
-            features[i * d + j] = rand();
+        let mut f = [0.0f64; 6];
+        for v in f.iter_mut() {
+            *v = rand();
         }
-        let z = 2.0 * features[i * d] + features[i * d + 2];
+        let z = 2.0 * f[0] + f[2];
         labels[i] = if z > 0.0 { 1.0 } else { 0.0 };
 
         // Sprinkle ~10% NaNs into feature 3 (a noise column) and feature 0 (predictive).
         if rand() > 0.8 {
-            features[i * d + 3] = f64::NAN;
+            f[3] = f64::NAN;
         }
         if rand() > 0.9 {
-            features[i * d] = f64::NAN;
+            f[0] = f64::NAN;
         }
+        rows.push(Row { f });
     }
 
     let mut cfg = Config::default();
@@ -42,20 +48,21 @@ fn main() {
     cfg.learning_rate = 0.1;
     cfg.seed = 0;
 
-    let ds = DatasetBuilder::from_rows(&features, n, d, &labels, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&ds, None).unwrap();
+    let mut fb = FeatureBuilder::<Row>::new();
+    for j in 0..d {
+        // `move` so each closure captures its own `j`.
+        fb = fb.add(format!("f{j}"), None, move |r| r.f[j]);
+    }
+
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None).unwrap();
 
     let split = model.feature_importance_split();
     let gain = model.feature_importance_gain();
-    println!("feature | splits | gain");
-    for j in 0..d {
-        println!("  f{j}    |  {:5} | {:.3}", split[j], gain[j]);
-    }
+    println!("{}", fb.format_importance(&split, &gain));
 
     // Spot-check predictions on rows with missing values still work.
-    let probs = model.predict_proba(&features[..5 * d], 5);
+    let probs = model.predict_proba(&fb, &rows[..5]);
     for (i, p) in probs.iter().enumerate() {
-        let row = &features[i * d..(i + 1) * d];
-        println!("row {i} {row:?} -> p={p:.4}");
+        println!("row {i} {:?} -> p={p:.4}", rows[i].f);
     }
 }

@@ -321,7 +321,7 @@ fn partition_indices<B: Bin>(
     let threshold = B::from_u16(threshold_bin);
     let n_parent = parent_indices.len();
     // SAFETY: caller pre-sized left_out/right_out to the exact split counts,
-    // and feat_col covers every row index in parent_indices (DatasetBuilder
+    // and feat_col covers every row index in parent_indices (dataset builder
     // invariant).
     unsafe {
         let lp = left_out.as_mut_ptr();

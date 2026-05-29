@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Bin, BinData, BinMapper, BinWidth, Dataset, with_columns};
 use crate::error::{Error, Result};
+use crate::feature::FeatureBuilder;
 use crate::loss::sigmoid;
 use crate::tree::Tree;
 
@@ -16,6 +17,9 @@ pub struct Model {
     pub(crate) init_score: f64,
     pub(crate) learning_rate: f64,
     pub(crate) n_features: usize,
+    /// Feature names in index order, copied from the training
+    /// [`FeatureBuilder`]. Predict asserts the supplied builder matches these.
+    pub(crate) feature_names: Vec<String>,
     /// Required by the binned inference path: per-node `threshold_bin` values
     /// in trees are calibrated to these specific mappers, so re-fitting would
     /// produce wrong predictions.
@@ -37,6 +41,11 @@ impl Model {
     /// Number of input features this model expects per row.
     pub fn n_features(&self) -> usize {
         self.n_features
+    }
+
+    /// Feature names in index order, as declared by the training builder.
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
     }
 
     /// Number of trees in the ensemble. After early stopping, this equals
@@ -94,25 +103,38 @@ impl Model {
         gains
     }
 
-    /// Predict raw additive scores (pre-sigmoid logits) for a row-major feature
-    /// matrix of shape `n_rows × self.n_features()`.
-    ///
-    /// # Panics
-    /// Panics if `features.len() != n_rows * self.n_features()`.
-    pub fn predict_raw_scores(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
-        let n_features = self.n_features;
+    /// Assert the supplied builder declares exactly the features this model was
+    /// trained on (same names, same order). Guards against predicting with a
+    /// mismatched extractor set.
+    fn check_features<T>(&self, features: &FeatureBuilder<T>) {
         assert_eq!(
             features.len(),
-            n_rows * n_features,
-            "features.len() {} != n_rows {} * n_features {}",
+            self.n_features,
+            "feature count mismatch: builder has {}, model expects {}",
             features.len(),
-            n_rows,
-            n_features
+            self.n_features
         );
+        for (i, (got, want)) in features.names().zip(self.feature_names.iter()).enumerate() {
+            assert_eq!(
+                got, want,
+                "feature {i} name mismatch: builder has {got:?}, model expects {want:?}"
+            );
+        }
+    }
+
+    /// Predict raw additive scores (pre-sigmoid logits) for `rows`, extracting
+    /// features through `features` (the same builder used to train). Walks the
+    /// trees on raw `f64` values.
+    ///
+    /// # Panics
+    /// Panics if `features` doesn't match the model's declared features.
+    pub fn predict_raw_scores<T>(&self, features: &FeatureBuilder<T>, rows: &[T]) -> Vec<f64> {
+        self.check_features(features);
+        let n_features = self.n_features;
+        let flat = features.extract_row_major(rows);
         let init = self.init_score;
-        (0..n_rows)
-            .map(|row| {
-                let r = &features[row * n_features..(row + 1) * n_features];
+        flat.chunks(n_features.max(1))
+            .map(|r| {
                 let mut s = init;
                 for tree in &self.trees {
                     s += self.learning_rate * tree.predict_raw(r);
@@ -122,17 +144,16 @@ impl Model {
             .collect()
     }
 
-    /// Predict probabilities (sigmoid of raw scores) for a row-major feature
-    /// matrix of shape `n_rows × self.n_features()`.
-    pub fn predict_proba(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
-        let raw = self.predict_raw_scores(features, n_rows);
+    /// Predict probabilities (sigmoid of raw scores) for `rows`.
+    pub fn predict_proba<T>(&self, features: &FeatureBuilder<T>, rows: &[T]) -> Vec<f64> {
+        let raw = self.predict_raw_scores(features, rows);
         raw.into_iter().map(sigmoid).collect()
     }
 
     /// Predict raw additive scores against an already-binned dataset. Faster
     /// than the raw f64 path when you can amortize binning across many
     /// predict calls.
-    pub fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
+    pub(crate) fn predict_raw_scores_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
         let n = dataset.n_rows();
         let mut scores = vec![self.init_score; n];
         let feats: Vec<usize> = (0..dataset.n_features()).collect();
@@ -151,55 +172,41 @@ impl Model {
         scores: &mut [f64],
     ) {
         for tree in &self.trees {
-            for row in 0..n_rows {
-                scores[row] += self.learning_rate * tree.predict_on_columns(columns, row);
+            for (row, s) in scores.iter_mut().enumerate().take(n_rows) {
+                *s += self.learning_rate * tree.predict_on_columns(columns, row);
             }
         }
     }
 
-    /// Predict probabilities against an already-binned dataset.
-    pub fn predict_proba_on_dataset(&self, dataset: &Dataset) -> Vec<f64> {
-        let raw = self.predict_raw_scores_on_dataset(dataset);
-        raw.into_iter().map(sigmoid).collect()
-    }
-
-    /// Bin the inputs using the training-time mappers, then walk trees on bin
-    /// codes. Faster than [`Model::predict_raw_scores`] on batches (~10K+
-    /// rows): u8/u16 comparisons instead of f64, ~8× smaller rows, no NaN
-    /// check per node. Predictions match the raw path bit-for-bit.
+    /// Extract features through `features`, bin them with the training-time
+    /// mappers, then walk trees on bin codes. Faster than
+    /// [`Model::predict_raw_scores`] on batches (~10K+ rows): u8/u16
+    /// comparisons instead of f64, ~8× smaller rows, no NaN check per node.
+    /// Predictions match the raw path bit-for-bit.
     ///
     /// # Panics
-    /// Panics if `features.len() != n_rows * self.n_features()`.
-    pub fn predict_raw_scores_binned(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
-        let dataset = self.bin_for_predict(features, n_rows);
+    /// Panics if `features` doesn't match the model's declared features.
+    pub fn predict_raw_scores_binned<T>(
+        &self,
+        features: &FeatureBuilder<T>,
+        rows: &[T],
+    ) -> Vec<f64> {
+        self.check_features(features);
+        let dataset = self.bin_for_predict(features.extract_columns(rows), rows.len());
         self.predict_raw_scores_on_dataset(&dataset)
     }
 
     /// Like [`Model::predict_proba`] but uses the binned inference path.
-    pub fn predict_proba_binned(&self, features: &[f64], n_rows: usize) -> Vec<f64> {
-        let raw = self.predict_raw_scores_binned(features, n_rows);
+    pub fn predict_proba_binned<T>(&self, features: &FeatureBuilder<T>, rows: &[T]) -> Vec<f64> {
+        let raw = self.predict_raw_scores_binned(features, rows);
         raw.into_iter().map(sigmoid).collect()
     }
 
-    /// Bin `features` with `self.bin_mappers` and pack into a Dataset. Width
-    /// choice mirrors [`crate::dataset::DatasetBuilder`].
-    fn bin_for_predict(&self, features: &[f64], n_rows: usize) -> Dataset {
+    /// Bin column-major `columns` with `self.bin_mappers` and pack into a
+    /// Dataset. Width choice mirrors the training-time dataset builder.
+    fn bin_for_predict(&self, columns: Vec<Vec<f64>>, n_rows: usize) -> Dataset {
         let n_features = self.n_features;
-        assert_eq!(
-            features.len(),
-            n_rows * n_features,
-            "features.len() {} != n_rows {} * n_features {}",
-            features.len(),
-            n_rows,
-            n_features
-        );
-        assert_eq!(
-            self.bin_mappers.len(),
-            n_features,
-            "model.bin_mappers.len() {} != n_features {}",
-            self.bin_mappers.len(),
-            n_features
-        );
+        debug_assert_eq!(columns.len(), n_features);
 
         let max_num_bins = self
             .bin_mappers
@@ -214,8 +221,8 @@ impl Model {
         };
 
         let bin_data = match width {
-            BinWidth::U8 => BinData::U8(self.bin_columns::<u8>(features, n_rows, n_features)),
-            BinWidth::U16 => BinData::U16(self.bin_columns::<u16>(features, n_rows, n_features)),
+            BinWidth::U8 => BinData::U8(self.bin_columns::<u8>(&columns)),
+            BinWidth::U16 => BinData::U16(self.bin_columns::<u16>(&columns)),
         };
 
         Dataset {
@@ -227,22 +234,11 @@ impl Model {
         }
     }
 
-    fn bin_columns<B: Bin>(
-        &self,
-        features: &[f64],
-        n_rows: usize,
-        n_features: usize,
-    ) -> Vec<Vec<B>> {
-        (0..n_features)
-            .map(|feat| {
-                let bm = &self.bin_mappers[feat];
-                let mut col: Vec<B> = Vec::with_capacity(n_rows);
-                for row in 0..n_rows {
-                    let v = features[row * n_features + feat];
-                    col.push(B::from_u16(bm.value_to_bin(v)));
-                }
-                col
-            })
+    fn bin_columns<B: Bin>(&self, columns: &[Vec<f64>]) -> Vec<Vec<B>> {
+        columns
+            .iter()
+            .zip(self.bin_mappers.iter())
+            .map(|(col, bm)| col.iter().map(|&v| B::from_u16(bm.value_to_bin(v))).collect())
             .collect()
     }
 }

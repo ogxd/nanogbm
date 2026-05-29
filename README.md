@@ -15,12 +15,23 @@ nanogbm = "0.4"
 ```
 
 ```rust
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
+
+struct Row { age: f64, income: f64, active: bool }
 
 let cfg = Config { num_iterations: 100, learning_rate: 0.1, num_leaves: 31, ..Config::default() };
-let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg)?;
-let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
-let probs = model.predict_proba(&features, n_rows);
+
+// Declare features as named closures over your own row type. An optional
+// per-feature `max_bin` overrides the config default; return NaN for missing.
+let fb = FeatureBuilder::<Row>::new()
+    .add("age", None, |r| r.age)
+    .add("income", Some(128), |r| r.income)
+    .add("active", None, |r| if r.active { 1.0 } else { 0.0 });
+
+let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None)?;
+
+// The closures live in `fb`, not the model — hand the same builder to predict.
+let probs = model.predict_proba(&fb, &rows);
 ```
 
 ## Why does this exist?
@@ -62,17 +73,15 @@ Performance-wise, nanogbm is supposed to be as fast, if not faster, than LightGB
 - **Bincode v2 serialization** with serde derives. Stable across runs;
   re-check after layout changes to `Tree`, `SplitNode`, `BinMapper`, or
   `Model`.
-- **A feature-encoding helper layer** (`nanogbm::feature`). You write one
-  `encode_into` function that pushes `num`, `bool`, `cat`, `cat_hashed`, or
-  `multi_hot` values into a sink, and run it twice — once with
-  `DiscoverySink` to derive a `Schema`, then with `SliceSink` per row on the
-  hot path. Worth being precise here: the schema *knows* which columns are
-  categorical (the feature-importance printer uses it), but the learner does
-  **not** do native categorical splits. `cat(v)` writes `v as f64`,
-  `cat_hashed` writes a hash bucket index as `f64`, and the trees then split
-  those columns numerically like any other feature. If you need true subset
-  splits, expand to one-hot via `multi_hot` and let the learner work on
-  that.
+- **A declarative feature layer** (`nanogbm::FeatureBuilder`). You declare
+  each column as `(name, optional max_bin, closure)` over your own row type
+  `T`; the closure returns one `f64` per row (`NaN` for missing). The same
+  builder is handed to training and to `model.predict_*`, because the
+  closures can't be serialized — the saved model only carries bin mappers and
+  feature names and re-extracts through the builder you supply. There are no
+  native categorical splits: encode a category to a number in your closure
+  (e.g. an id, or a hash bucket) and the trees split it numerically like any
+  other feature; one-hot it yourself if you need true subset splits.
 
 ## What's not in the box
 
