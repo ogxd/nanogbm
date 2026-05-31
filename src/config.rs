@@ -64,10 +64,6 @@ pub struct Config {
     /// default (right) side. Default `100`.
     pub min_data_per_group: usize,
 
-    /// Cardinality at or below which a categorical feature is split one-vs-rest
-    /// instead of by sorted-subset scan (LightGBM `max_cat_to_onehot`). Default `4`.
-    pub max_cat_to_onehot: usize,
-
     /// Maximum bins per numerical feature (includes one slot for the MISSING
     /// bin, so at most `max_bin - 1` real bins). Must be in `[2, 65535]`.
     pub max_bin: usize,
@@ -116,7 +112,6 @@ impl Default for Config {
             cat_l2: 10.0,
             max_cat_threshold: 32,
             min_data_per_group: 100,
-            max_cat_to_onehot: 4,
             max_bin: 255,
             min_data_in_bin: 3,
             feature_fraction: 1.0,

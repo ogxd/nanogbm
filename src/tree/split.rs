@@ -163,12 +163,11 @@ pub fn find_best_split_for_feature(
 /// LightGBM's `FindBestThresholdCategorical`.
 ///
 /// Categories below `min_data_per_group` rows are dropped (forced to the
-/// default/right side). With at most `max_cat_to_onehot` remaining categories
-/// the split is one-vs-rest; otherwise categories are sorted by their
-/// smoothed gradient ratio `grad / (hess + cat_smooth)` and the best subset is
-/// found by scanning up to `max_cat_threshold` categories inward from *each*
-/// end of that order (Fisher 1958: the optimal partition for the L2 objective
-/// is contiguous in this order). Gains use `lambda_l2 + cat_l2`. The chosen
+/// default/right side). The remaining categories are sorted by their smoothed
+/// gradient ratio `grad / (hess + cat_smooth)` and the best subset is found by
+/// scanning up to `max_cat_threshold` categories inward from *each* end of that
+/// order (Fisher 1958: the optimal partition for the L2 objective is contiguous
+/// in this order). Gains use `lambda_l2 + cat_l2`. The chosen
 /// categories (returned in `cat_left_bins`) go left; everything else, including
 /// dropped/rare categories and the missing bin, goes right. The ordering is
 /// recomputed per node from current boosting residuals, so it does not leak the
@@ -230,36 +229,26 @@ pub fn find_best_categorical_split(
         }
     };
 
-    if used.len() <= config.max_cat_to_onehot {
-        // Low cardinality: try each single category as the left group.
-        for &b in &used {
-            let (lg, lh, lc) = (hist.bins[b].grad, hist.bins[b].hess, hist.bins[b].count as i64);
+    // Sort by smoothed gradient ratio, then grow the left group inward from
+    // each end up to `max_cat_threshold` categories.
+    used.sort_by(|&a, &b| {
+        let ra = hist.bins[a].grad / (hist.bins[a].hess + config.cat_smooth);
+        let rb = hist.bins[b].grad / (hist.bins[b].hess + config.cat_smooth);
+        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let m = used.len();
+    let limit = config.max_cat_threshold.min(m - 1);
+    for forward in [true, false] {
+        let (mut lg, mut lh, mut lc) = (0.0, 0.0, 0i64);
+        let mut left_bins: Vec<u16> = Vec::with_capacity(limit);
+        for step in 0..limit {
+            let idx = if forward { used[step] } else { used[m - 1 - step] };
+            lg += hist.bins[idx].grad;
+            lh += hist.bins[idx].hess;
+            lc += hist.bins[idx].count as i64;
+            left_bins.push(idx as u16);
             if let Some(gain) = eval(lg, lh, lc) {
-                consider(make(vec![b as u16], lg, lh, lc, gain), &mut best);
-            }
-        }
-    } else {
-        // Sort by smoothed gradient ratio, then grow the left group inward from
-        // each end up to `max_cat_threshold` categories.
-        used.sort_by(|&a, &b| {
-            let ra = hist.bins[a].grad / (hist.bins[a].hess + config.cat_smooth);
-            let rb = hist.bins[b].grad / (hist.bins[b].hess + config.cat_smooth);
-            ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let m = used.len();
-        let limit = config.max_cat_threshold.min(m - 1);
-        for forward in [true, false] {
-            let (mut lg, mut lh, mut lc) = (0.0, 0.0, 0i64);
-            let mut left_bins: Vec<u16> = Vec::with_capacity(limit);
-            for step in 0..limit {
-                let idx = if forward { used[step] } else { used[m - 1 - step] };
-                lg += hist.bins[idx].grad;
-                lh += hist.bins[idx].hess;
-                lc += hist.bins[idx].count as i64;
-                left_bins.push(idx as u16);
-                if let Some(gain) = eval(lg, lh, lc) {
-                    consider(make(left_bins.clone(), lg, lh, lc, gain), &mut best);
-                }
+                consider(make(left_bins.clone(), lg, lh, lc, gain), &mut best);
             }
         }
     }

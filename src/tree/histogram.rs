@@ -3,6 +3,13 @@ use crate::dataset::Bin;
 /// One histogram bin: gradient sum, hessian sum, row count.
 /// 24 bytes (8 + 8 + 4 + 4 padding) — sized to one machine word triple so
 /// a single cache line covers 2-3 bins on x86-64 / Apple Silicon.
+///
+/// Grad/hess are `f64`, NOT `f32`. This is load-bearing: the per-leaf gradient
+/// sum is a cancellation of large opposite-sign partial sums (negatives vs.
+/// the rare positives), and the sibling trick subtracts two nearly-equal
+/// sums. On large/imbalanced data, f32's ~7 digits get consumed by the
+/// partial sums and the split-driving signal is lost — empirically collapsing
+/// model quality to near-random. Keep these f64.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct HistBin {

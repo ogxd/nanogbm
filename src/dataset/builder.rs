@@ -3,24 +3,22 @@ use crate::error::{Error, Result};
 
 /// Build a binned [`Dataset`] from column-major `f64` data.
 ///
-/// `max_bins[i]` is the per-feature bin cap (already resolved against the
-/// config default by the caller); each column gets its own [`BinMapper`] fit
-/// to that cap. Storage width is `u8` when every column fits in a byte
-/// (`max_bin <= 256`), else `u16`.
+/// `max_bin` is the bin cap applied to every column; each column gets its own
+/// [`BinMapper`] fit to that cap. Storage width is `u8` when the cap fits in a
+/// byte (`max_bin <= 256`), else `u16`.
 pub(crate) fn build_dataset(
     columns: Vec<Vec<f64>>,
-    max_bins: &[usize],
+    max_bin: usize,
     categorical: &[bool],
     min_data_in_bin: usize,
     labels: &[f32],
 ) -> Result<Dataset> {
     let n_features = columns.len();
     let n_rows = check_columns(&columns, labels)?;
-    debug_assert_eq!(max_bins.len(), n_features);
     debug_assert_eq!(categorical.len(), n_features);
 
-    // u8 storage iff every column's bin domain fits in a byte.
-    let width = if max_bins.iter().all(|&b| b <= 256) {
+    // u8 storage iff the bin domain fits in a byte.
+    let width = if max_bin <= 256 {
         BinWidth::U8
     } else {
         BinWidth::U16
@@ -28,13 +26,12 @@ pub(crate) fn build_dataset(
 
     let bin_mappers: Vec<BinMapper> = columns
         .iter()
-        .zip(max_bins)
         .zip(categorical)
-        .map(|((col, &mb), &cat)| {
+        .map(|(col, &cat)| {
             if cat {
-                BinMapper::fit_categorical(col, mb)
+                BinMapper::fit_categorical(col, max_bin)
             } else {
-                BinMapper::fit(col, mb, min_data_in_bin)
+                BinMapper::fit(col, max_bin, min_data_in_bin)
             }
         })
         .collect();
