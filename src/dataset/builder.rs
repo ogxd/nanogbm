@@ -10,12 +10,14 @@ use crate::error::{Error, Result};
 pub(crate) fn build_dataset(
     columns: Vec<Vec<f64>>,
     max_bins: &[usize],
+    categorical: &[bool],
     min_data_in_bin: usize,
     labels: &[f32],
 ) -> Result<Dataset> {
     let n_features = columns.len();
     let n_rows = check_columns(&columns, labels)?;
     debug_assert_eq!(max_bins.len(), n_features);
+    debug_assert_eq!(categorical.len(), n_features);
 
     // u8 storage iff every column's bin domain fits in a byte.
     let width = if max_bins.iter().all(|&b| b <= 256) {
@@ -27,7 +29,14 @@ pub(crate) fn build_dataset(
     let bin_mappers: Vec<BinMapper> = columns
         .iter()
         .zip(max_bins)
-        .map(|(col, &mb)| BinMapper::fit(col, mb, min_data_in_bin))
+        .zip(categorical)
+        .map(|((col, &mb), &cat)| {
+            if cat {
+                BinMapper::fit_categorical(col, mb)
+            } else {
+                BinMapper::fit(col, mb, min_data_in_bin)
+            }
+        })
         .collect();
 
     let bin_data = match width {

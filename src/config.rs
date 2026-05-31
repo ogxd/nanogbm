@@ -46,6 +46,28 @@ pub struct Config {
     /// raise it to prune trivially-improving splits on noisy datasets.
     pub min_gain_to_split: f64,
 
+    /// Categorical split smoothing (LightGBM `cat_smooth`): added to each
+    /// category's hessian when ranking categories by gradient ratio, so a
+    /// low-count category can't jump to an extreme rank. Default `10.0`.
+    pub cat_smooth: f64,
+
+    /// Extra L2 regularization applied to categorical-split gains (LightGBM
+    /// `cat_l2`), on top of `lambda_l2`. Default `10.0`.
+    pub cat_l2: f64,
+
+    /// Max categories on the smaller side of a categorical subset split
+    /// (LightGBM `max_cat_threshold`): bounds partition granularity. Default `32`.
+    pub max_cat_threshold: usize,
+
+    /// Minimum rows for a category to participate in a categorical split
+    /// (LightGBM `min_data_per_group`); rarer categories are forced to the
+    /// default (right) side. Default `100`.
+    pub min_data_per_group: usize,
+
+    /// Cardinality at or below which a categorical feature is split one-vs-rest
+    /// instead of by sorted-subset scan (LightGBM `max_cat_to_onehot`). Default `4`.
+    pub max_cat_to_onehot: usize,
+
     /// Maximum bins per numerical feature (includes one slot for the MISSING
     /// bin, so at most `max_bin - 1` real bins). Must be in `[2, 65535]`.
     pub max_bin: usize,
@@ -90,6 +112,11 @@ impl Default for Config {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_gain_to_split: 0.0,
+            cat_smooth: 10.0,
+            cat_l2: 10.0,
+            max_cat_threshold: 32,
+            min_data_per_group: 100,
+            max_cat_to_onehot: 4,
             max_bin: 255,
             min_data_in_bin: 3,
             feature_fraction: 1.0,

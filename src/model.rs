@@ -131,7 +131,19 @@ impl Model {
     pub fn predict_raw_scores<T>(&self, features: &FeatureBuilder<T>, rows: &[T]) -> Vec<f64> {
         self.check_features(features);
         let n_features = self.n_features;
-        let flat = features.extract_row_major(rows);
+        let mut flat = features.extract_row_major(rows);
+        // Categorical nodes route by bin-code set membership, so rewrite the
+        // raw value of each categorical column to its bin code (matching the
+        // binned path); numeric columns keep their raw f64.
+        let cat_feats: Vec<usize> =
+            self.bin_mappers.iter().enumerate().filter(|(_, m)| m.is_categorical()).map(|(i, _)| i).collect();
+        if !cat_feats.is_empty() {
+            for chunk in flat.chunks_mut(n_features.max(1)) {
+                for &j in &cat_feats {
+                    chunk[j] = self.bin_mappers[j].value_to_bin(chunk[j]) as f64;
+                }
+            }
+        }
         let init = self.init_score;
         flat.chunks(n_features.max(1))
             .map(|r| {

@@ -22,6 +22,9 @@ use crate::error::Result;
 struct Feature<T> {
     name: String,
     max_bin: Option<usize>,
+    /// When true, the column is split as a categorical (per-node subset split)
+    /// rather than a numeric threshold; see [`BinMapper::fit_categorical`].
+    categorical: bool,
     extract: Box<dyn Fn(&T) -> f64>,
 }
 
@@ -69,6 +72,7 @@ impl<T> FeatureBuilder<T> {
         self.features.push(Feature {
             name: name.into(),
             max_bin,
+            categorical: false,
             extract: Box::new(extract),
         });
         self
@@ -82,6 +86,7 @@ impl<T> FeatureBuilder<T> {
         self.features.push(Feature {
             name: name.into(),
             max_bin: None,
+            categorical: false,
             extract: Box::new(move |r| if extract(r) { 1.0 } else { 0.0 }),
         });
         self
@@ -100,6 +105,31 @@ impl<T> FeatureBuilder<T> {
         self.features.push(Feature {
             name: name.into(),
             max_bin,
+            categorical: false,
+            extract: Box::new(move |r| {
+                let h = extract(r);
+                let h = gxhash::GxBuildHasher::with_seed(42).hash_one(&h);
+                f64::from_bits(h)
+            }),
+        });
+        self
+    }
+
+    /// Like [`add_hash`](Self::add_hash) but flags the column categorical: the
+    /// learner splits it by optimal subset partition per node
+    /// (see [`BinMapper::fit_categorical`](crate::dataset::BinMapper::fit_categorical))
+    /// instead of a threshold on the (arbitrary) hashed order. Use for
+    /// low-cardinality unordered ids.
+    pub fn add_categorical<H: Hash>(
+        mut self,
+        name: impl Into<String>,
+        max_bin: Option<usize>,
+        extract: impl Fn(&T) -> H + 'static,
+    ) -> Self {
+        self.features.push(Feature {
+            name: name.into(),
+            max_bin,
+            categorical: true,
             extract: Box::new(move |r| {
                 let h = extract(r);
                 let h = gxhash::GxBuildHasher::with_seed(42).hash_one(&h);
@@ -131,6 +161,11 @@ impl<T> FeatureBuilder<T> {
             .collect()
     }
 
+    /// Per-feature categorical flag, in declaration (index) order.
+    pub(crate) fn categorical_flags(&self) -> Vec<bool> {
+        self.features.iter().map(|f| f.categorical).collect()
+    }
+
     /// Extract column-major `f64` data: `out[feat][row]`.
     pub(crate) fn extract_columns(&self, rows: &[T]) -> Vec<Vec<f64>> {
         self.features
@@ -159,7 +194,8 @@ impl<T> FeatureBuilder<T> {
     pub fn build_dataset(&self, rows: &[T], labels: &[f32], config: &Config) -> Result<Dataset> {
         let columns = self.extract_columns(rows);
         let max_bins = self.max_bins(config.max_bin);
-        builder::build_dataset(columns, &max_bins, config.min_data_in_bin, labels)
+        let categorical = self.categorical_flags();
+        builder::build_dataset(columns, &max_bins, &categorical, config.min_data_in_bin, labels)
     }
 
     /// Format a per-feature importance report as a sortable table, rows sorted

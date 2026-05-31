@@ -144,6 +144,59 @@ fn predict_bin_and_raw_paths_agree() {
 }
 
 #[test]
+fn categorical_split_learns_noncontiguous_subset_and_paths_agree() {
+    // Feature 0 is noise; feature 1 is a categorical id in 0..12 whose label
+    // depends on membership in a NON-contiguous "bidding" subset {1,4,7,9}.
+    // A numeric threshold on the (arbitrary-order) id cannot separate this; a
+    // per-node subset split can.
+    let mut rng = ChaCha8Rng::seed_from_u64(7);
+    let bidders = [1.0, 4.0, 7.0, 9.0];
+    let mut make = |n: usize| -> (Vec<Row>, Vec<f32>) {
+        let mut rows = Vec::with_capacity(n);
+        let mut labels = vec![0f32; n];
+        for label in labels.iter_mut() {
+            let noise: f64 = rng.gen_range(-3.0..3.0);
+            let cat = rng.gen_range(0..12) as f64;
+            let p = if bidders.contains(&cat) { 0.85 } else { 0.1 };
+            *label = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+            rows.push(vec![noise, cat]);
+        }
+        (rows, labels)
+    };
+    let (tx, ty) = make(6000);
+    let (ex, ey) = make(3000);
+
+    let mut cfg = Config::default();
+    cfg.num_iterations = 60;
+    cfg.learning_rate = 0.1;
+    cfg.num_leaves = 15;
+    cfg.min_data_in_leaf = 20;
+    cfg.max_bin = 32;
+    cfg.feature_fraction = 1.0;
+    cfg.bagging_fraction = 1.0;
+
+    let fb = FeatureBuilder::<Row>::new()
+        .add("noise", None, |r: &Row| r[0])
+        .add_categorical("cat", Some(32), |r: &Row| r[1] as i64);
+    let model = GbdtTrainer::new(&cfg, &fb).fit(&tx, &ty, None).unwrap();
+
+    // A categorical split must have been chosen.
+    let cat_splits: usize = model.trees().iter().map(|t| t.category_sets.len()).sum();
+    assert!(cat_splits > 0, "expected at least one categorical split");
+
+    // Raw and binned paths must agree bit-for-bit through the categorical route.
+    let raw = model.predict_proba(&fb, &ex);
+    let binned = model.predict_proba_binned(&fb, &ex);
+    let max_abs = raw.iter().zip(binned.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+    assert!(max_abs < 1e-9, "raw vs binned diverged by {max_abs}");
+
+    // The model must actually separate bidders from non-bidders.
+    let raw_scores = model.predict_raw_scores(&fb, &ex);
+    let ll = binary_logloss(&raw_scores, &ey);
+    assert!(ll < 0.45, "logloss {ll} too high; categorical subset not learned");
+}
+
+#[test]
 fn predict_proba_binned_matches_raw_proba() {
     // Binned predict path must produce the same predictions as the raw f64
     // predict path: the trees carry both `threshold` and `threshold_bin`, and
