@@ -38,17 +38,40 @@ pub fn sigmoid_fast_f32(x: f32) -> f32 {
     if x >= 0.0 { s_pos } else { s_neg }
 }
 
-/// Prior log-odds of the labels. The boosting loop starts from this constant.
-pub fn init_score(labels: &[f32]) -> f64 {
-    let n = labels.len() as f64;
-    let pos: f64 = labels.iter().map(|&y| y as f64).sum();
-    let mean = (pos / n).clamp(1e-6, 1.0 - 1e-6);
+/// Prior log-odds of the labels (weighted by `weights` if given). The boosting
+/// loop starts from this constant.
+pub fn init_score(labels: &[f32], weights: Option<&[f32]>) -> f64 {
+    let (pos, total) = match weights {
+        None => (labels.iter().map(|&y| y as f64).sum::<f64>(), labels.len() as f64),
+        Some(w) => {
+            let mut pos = 0.0;
+            let mut total = 0.0;
+            for (&y, &wi) in labels.iter().zip(w) {
+                let wi = wi as f64;
+                pos += wi * y as f64;
+                total += wi;
+            }
+            (pos, total)
+        }
+    };
+    let mean = (pos / total).clamp(1e-6, 1.0 - 1e-6);
     (mean / (1.0 - mean)).ln()
 }
 
-/// Write packed `[grad, hess]` pairs from current raw scores and labels.
-/// Packed so the histogram hot loop fetches both with one 8-byte load.
-pub fn gradients_packed(raw_scores: &[f64], labels: &[f32], out: &mut [[f32; 2]]) {
+/// Write packed `[grad, hess]` pairs from current raw scores and labels. With
+/// `weights`, each row's grad and hess are scaled by its weight (LightGBM
+/// `weight` column), which carries through the histogram sums into leaf values
+/// and split gains. Packed so the histogram hot loop fetches both with one
+/// 8-byte load.
+pub fn gradients_packed(raw_scores: &[f64], labels: &[f32], weights: Option<&[f32]>, out: &mut [[f32; 2]]) {
+    match weights {
+        None => gradients_unweighted(raw_scores, labels, out),
+        Some(w) => gradients_weighted(raw_scores, labels, w, out),
+    }
+}
+
+#[inline]
+fn gradients_unweighted(raw_scores: &[f64], labels: &[f32], out: &mut [[f32; 2]]) {
     let n = raw_scores.len();
     for i in 0..n {
         let s = raw_scores[i] as f32;
@@ -57,6 +80,21 @@ pub fn gradients_packed(raw_scores: &[f64], labels: &[f32], out: &mut [[f32; 2]]
         out[i][0] = p - y;
         let h = p * (1.0 - p);
         out[i][1] = if h > 1e-6 { h } else { 1e-6 };
+    }
+}
+
+#[inline]
+fn gradients_weighted(raw_scores: &[f64], labels: &[f32], w: &[f32], out: &mut [[f32; 2]]) {
+    let n = raw_scores.len();
+    for i in 0..n {
+        let s = raw_scores[i] as f32;
+        let p = sigmoid_fast_f32(s);
+        let y = labels[i];
+        let wi = w[i];
+        out[i][0] = wi * (p - y);
+        let h = p * (1.0 - p);
+        let h = if h > 1e-6 { h } else { 1e-6 };
+        out[i][1] = wi * h;
     }
 }
 

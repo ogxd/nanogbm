@@ -4,7 +4,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::config::Config;
 use crate::dataset::Dataset;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::feature::FeatureBuilder;
 use crate::loss;
 use crate::model::Model;
@@ -17,11 +17,20 @@ use crate::tree::learner::TimingBuckets;
 pub struct GbdtTrainer<'a, T> {
     config: &'a Config,
     features: &'a FeatureBuilder<T>,
+    weights: Option<&'a [f32]>,
 }
 
 impl<'a, T> GbdtTrainer<'a, T> {
     pub fn new(config: &'a Config, features: &'a FeatureBuilder<T>) -> Self {
-        Self { config, features }
+        Self { config, features, weights: None }
+    }
+
+    /// Per-row sample weights (LightGBM `weight` column); the binary-logistic
+    /// loss is scaled per row, carrying through to leaf values and split gains.
+    /// Length must equal the training rows passed to [`fit`](Self::fit).
+    pub fn with_weights(mut self, weights: &'a [f32]) -> Self {
+        self.weights = Some(weights);
+        self
     }
 
     /// Train a GBDT model on `rows`/`labels`. Features are extracted and binned
@@ -35,6 +44,11 @@ impl<'a, T> GbdtTrainer<'a, T> {
         valid: Option<(&[T], &[f32])>,
     ) -> Result<Model> {
         self.config.validate()?;
+        if let Some(w) = self.weights {
+            if w.len() != labels.len() {
+                return Err(Error::Config(format!("weights len {} != labels len {}", w.len(), labels.len())));
+            }
+        }
         let train = self.features.build_dataset(rows, labels, self.config)?;
         let valid_ds = match valid {
             Some((vr, vl)) => Some(self.features.build_dataset(vr, vl, self.config)?),
@@ -48,7 +62,7 @@ impl<'a, T> GbdtTrainer<'a, T> {
 
         let n = train.n_rows();
         let n_features = train.n_features();
-        let init_score = loss::init_score(train.labels());
+        let init_score = loss::init_score(train.labels(), self.weights);
 
         let mut raw_scores = vec![init_score; n];
         // Packed [grad, hess] pairs — one 8-byte load per row in the histogram
@@ -80,7 +94,7 @@ impl<'a, T> GbdtTrainer<'a, T> {
 
         for iter in 0..self.config.num_iterations {
             let t0 = std::time::Instant::now();
-            loss::gradients_packed(&raw_scores, train.labels(), &mut gradhess);
+            loss::gradients_packed(&raw_scores, train.labels(), self.weights, &mut gradhess);
             t_gradients += t0.elapsed();
 
             let row_indices: &[u32] = if bagging_on {

@@ -87,14 +87,14 @@ fn build_fixture(seed: u64) -> Fixture {
 
     // Realistic raw_scores: not all zero (would skew sigmoid). Use a small
     // dispersion around the init log-odds.
-    let init = loss::init_score(&labels);
+    let init = loss::init_score(&labels, None);
     let raw_scores: Vec<f64> = (0..N_ROWS)
         .map(|_| init + rng.gen_range(-0.5..0.5))
         .collect();
 
     // Compute initial gradhess.
     let mut gradhess = vec![[0.0f32; 2]; N_ROWS];
-    loss::gradients_packed(&raw_scores, &labels, &mut gradhess);
+    loss::gradients_packed(&raw_scores, &labels, None, &mut gradhess);
 
     // 50% subsample of indices, sorted.
     let mut indices: Vec<u32> = (0..N_ROWS as u32).collect();
@@ -125,6 +125,7 @@ fn bench_gradients(c: &mut Criterion, fx: &Fixture) {
             loss::gradients_packed(
                 black_box(&fx.raw_scores),
                 black_box(&fx.labels),
+                None,
                 black_box(&mut out),
             );
         })
