@@ -1,0 +1,11 @@
+# gxhash requires AES (and SSE2 on x86) intrinsics at compile time. Enable
+# them for this workspace so `cargo build`/`test` work on generic x86-64
+# targets (e.g. GitHub's ubuntu-latest runners) without per-invocation
+# RUSTFLAGS. aarch64 (e.g. Apple Silicon) already has AES on by default and
+# doesn't recognize these x86 features, so the flag is scoped to x86_64.
+#
+# NOTE: this applies only when building nanogbm as the top-level workspace.
+# It is ignored when nanogbm is consumed as a dependency, so downstream
+# crates (and docs.rs) must still enable these features themselves.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+aes,+sse2"]

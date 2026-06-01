@@ -3,6 +3,13 @@ use crate::dataset::Bin;
 /// One histogram bin: gradient sum, hessian sum, row count.
 /// 24 bytes (8 + 8 + 4 + 4 padding) — sized to one machine word triple so
 /// a single cache line covers 2-3 bins on x86-64 / Apple Silicon.
+///
+/// Grad/hess are `f64`, NOT `f32`. This is load-bearing: the per-leaf gradient
+/// sum is a cancellation of large opposite-sign partial sums (negatives vs.
+/// the rare positives), and the sibling trick subtracts two nearly-equal
+/// sums. On large/imbalanced data, f32's ~7 digits get consumed by the
+/// partial sums and the split-driving signal is lost — empirically collapsing
+/// model quality to near-random. Keep these f64.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct HistBin {
@@ -46,7 +53,7 @@ impl FeatureHistogram {
     /// Generic over the column element type `B: Bin` so u8 and u16 columns
     /// share one inner loop. Inner loop uses `get_unchecked` to elide bounds
     /// checks: bins are bounded by `num_bins` (BinMapper invariant), rows are
-    /// bounded by column.len() (DatasetBuilder invariant); both are upheld by
+    /// bounded by column.len() (dataset builder invariant); both are upheld by
     /// nanogbm's own pipeline.
     pub fn build<B: Bin>(&mut self, column: &[B], indices: &[u32], gradhess: &[[f32; 2]]) {
         self.clear();
@@ -139,7 +146,7 @@ pub fn build_histograms_batched<B: Bin>(
     let bin_ptrs: Vec<*mut HistBin> = histograms.iter_mut().map(|h| h.bins.as_mut_ptr()).collect();
     let col_ptrs: Vec<*const B> = columns.iter().map(|c| c.as_ptr()).collect();
     // SAFETY: every column has length >= max(indices), every histogram has
-    // capacity matching its column's bin domain (caller upholds via DatasetBuilder).
+    // capacity matching its column's bin domain (caller upholds via the dataset builder).
     unsafe {
         for &i in indices {
             let row = i as usize;

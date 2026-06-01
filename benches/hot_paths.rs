@@ -11,13 +11,13 @@ use rand::SeedableRng;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
-use nanogbm::dataset::{BinMapper, Dataset, DatasetBuilder};
+use nanogbm::dataset::{BinMapper, Dataset};
 use nanogbm::loss;
 use nanogbm::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
 use nanogbm::tree::split::find_best_split_for_feature;
-use nanogbm::{Config, GbdtTrainer};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
 
 /// Bench fixture sizes. Chosen to be representative of "real" workloads while
 /// still amortizing the criterion timer (~50ns overhead per sample).
@@ -26,9 +26,22 @@ const N_FEATURES: usize = 16;
 const MAX_BIN: usize = 64; // 63 real + 1 missing — typical config
 const SUBSAMPLE_FRACTION: f64 = 0.5;
 
+/// A bench row: a vector of `N_FEATURES` values.
+type Row = Vec<f64>;
+
+fn feature_builder() -> FeatureBuilder<Row> {
+    let mut fb = FeatureBuilder::<Row>::new();
+    for j in 0..N_FEATURES {
+        fb = fb.add_continuous(format!("f{j}"), move |r: &Row| r[j]);
+    }
+    fb
+}
+
 /// One synthetic, fully-built fixture shared across benches.
 struct Fixture {
     dataset: Dataset,
+    rows: Vec<Row>,
+    fb: FeatureBuilder<Row>,
     gradhess: Vec<[f32; 2]>,
     /// 50% subsample of row indices (sorted), used by indexed paths.
     indices: Vec<u32>,
@@ -44,18 +57,20 @@ fn build_fixture(seed: u64) -> Fixture {
     // Synthetic linearly-separable data, same shape as e2e but bigger.
     let weights: Vec<f64> = (0..N_FEATURES).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let bias: f64 = rng.gen_range(-0.5..0.5);
-    let mut features = vec![0.0f64; N_ROWS * N_FEATURES];
-    let mut labels = vec![0f32; N_ROWS];
-    for i in 0..N_ROWS {
+    let mut rows: Vec<Row> = Vec::with_capacity(N_ROWS);
+    let mut labels: Vec<f32> = Vec::with_capacity(N_ROWS);
+    for _ in 0..N_ROWS {
         let mut z = bias;
+        let mut row = vec![0.0f64; N_FEATURES];
         for j in 0..N_FEATURES {
             let x: f64 = rng.gen_range(-3.0..3.0);
-            features[i * N_FEATURES + j] = x;
+            row[j] = x;
             z += weights[j] * x;
         }
         z += rng.gen_range(-0.4..0.4);
         let p = 1.0 / (1.0 + (-z).exp());
-        labels[i] = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+        labels.push(if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 });
+        rows.push(row);
     }
 
     let mut cfg = Config::default();
@@ -67,19 +82,19 @@ fn build_fixture(seed: u64) -> Fixture {
     cfg.lambda_l2 = 1.0;
     cfg.seed = 0;
 
-    let dataset =
-        DatasetBuilder::from_rows(&features, N_ROWS, N_FEATURES, &labels, &cfg).unwrap();
+    let fb = feature_builder();
+    let dataset = fb.build_dataset(&rows, &labels, &cfg).unwrap();
 
     // Realistic raw_scores: not all zero (would skew sigmoid). Use a small
     // dispersion around the init log-odds.
-    let init = loss::init_score(&labels);
+    let init = loss::init_score(&labels, None);
     let raw_scores: Vec<f64> = (0..N_ROWS)
         .map(|_| init + rng.gen_range(-0.5..0.5))
         .collect();
 
     // Compute initial gradhess.
     let mut gradhess = vec![[0.0f32; 2]; N_ROWS];
-    loss::gradients_packed(&raw_scores, &labels, &mut gradhess);
+    loss::gradients_packed(&raw_scores, &labels, None, &mut gradhess);
 
     // 50% subsample of indices, sorted.
     let mut indices: Vec<u32> = (0..N_ROWS as u32).collect();
@@ -89,6 +104,8 @@ fn build_fixture(seed: u64) -> Fixture {
 
     Fixture {
         dataset,
+        rows,
+        fb,
         gradhess,
         indices,
         raw_scores,
@@ -108,6 +125,7 @@ fn bench_gradients(c: &mut Criterion, fx: &Fixture) {
             loss::gradients_packed(
                 black_box(&fx.raw_scores),
                 black_box(&fx.labels),
+                None,
                 black_box(&mut out),
             );
         })
@@ -283,9 +301,13 @@ fn bench_end_to_end(c: &mut Criterion, fx: &Fixture) {
     cfg.num_iterations = 10;
     cfg.early_stopping_round = 0;
 
+    // Note: this includes feature extraction + binning each iteration, so it
+    // measures the full public `fit` path, not just the training loop.
     group.bench_function("fit_10_iters", |b| {
         b.iter(|| {
-            let model = GbdtTrainer::new(&cfg).fit(&fx.dataset, None).unwrap();
+            let model = GbdtTrainer::new(&cfg, &fx.fb)
+                .fit(&fx.rows, &fx.labels, None)
+                .unwrap();
             black_box(model);
         })
     });

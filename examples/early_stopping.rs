@@ -4,9 +4,15 @@
 //! Run with: `cargo run --release --example early_stopping`
 
 use nanogbm::loss::binary_logloss;
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
 
-fn make_data(n: usize, d: usize, seed: u64) -> (Vec<f64>, Vec<f32>) {
+const D: usize = 10;
+
+struct Row {
+    f: [f64; D],
+}
+
+fn make_data(n: usize, seed: u64) -> (Vec<Row>, Vec<f32>) {
     let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
     let mut rand = || {
         s ^= s << 13;
@@ -14,27 +20,27 @@ fn make_data(n: usize, d: usize, seed: u64) -> (Vec<f64>, Vec<f32>) {
         s ^= s << 17;
         (s as f64 / u64::MAX as f64) * 2.0 - 1.0
     };
-    let weights: Vec<f64> = (0..d).map(|_| rand()).collect();
-    let mut features = vec![0.0; n * d];
+    let weights: Vec<f64> = (0..D).map(|_| rand()).collect();
+    let mut rows = Vec::with_capacity(n);
     let mut labels = vec![0f32; n];
     for i in 0..n {
+        let mut f = [0.0f64; D];
         let mut z = 0.0;
-        for j in 0..d {
-            let x = rand();
-            features[i * d + j] = x;
-            z += weights[j] * x;
+        for (j, v) in f.iter_mut().enumerate() {
+            *v = rand();
+            z += weights[j] * *v;
         }
         z += 0.2 * rand();
         let p = 1.0 / (1.0 + (-z).exp());
         labels[i] = if rand() * 0.5 + 0.5 < p { 1.0 } else { 0.0 };
+        rows.push(Row { f });
     }
-    (features, labels)
+    (rows, labels)
 }
 
 fn main() {
-    let d = 10;
-    let (tx, ty) = make_data(3000, d, 1);
-    let (vx, vy) = make_data(1000, d, 2);
+    let (tr, ty) = make_data(3000, 1);
+    let (vr, vy) = make_data(1000, 2);
 
     let mut cfg = Config::default();
     cfg.num_iterations = 500;
@@ -46,11 +52,16 @@ fn main() {
     cfg.verbose = true;
     cfg.seed = 0;
 
-    let train = DatasetBuilder::from_rows(&tx, 3000, d, &ty, &cfg).unwrap();
-    let valid = DatasetBuilder::from_rows(&vx, 1000, d, &vy, &cfg).unwrap();
-    let model = GbdtTrainer::new(&cfg).fit(&train, Some(&valid)).unwrap();
+    let mut fb = FeatureBuilder::<Row>::new();
+    for j in 0..D {
+        fb = fb.add_continuous(format!("f{j}"), move |r| r.f[j]);
+    }
 
-    let scores = model.predict_raw_scores(&vx, 1000);
+    let model = GbdtTrainer::new(&cfg, &fb)
+        .fit(&tr, &ty, Some((&vr, &vy)))
+        .unwrap();
+
+    let scores = model.predict_raw_scores(&fb, &vr);
     let logloss = binary_logloss(&scores, &vy);
     println!("trees={} valid_logloss={logloss:.5}", model.n_trees());
 }

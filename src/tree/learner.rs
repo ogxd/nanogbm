@@ -6,7 +6,7 @@ use crate::dataset::{Bin, Dataset, with_column, with_columns};
 use crate::tree::histogram::{
     FeatureHistogram, build_histograms_batched, build_histograms_batched_full,
 };
-use crate::tree::split::{SplitInfo, find_best_split_for_feature, threshold_leaf};
+use crate::tree::split::{SplitInfo, find_best_categorical_split, find_best_split_for_feature, threshold_leaf};
 use crate::tree::{MissingDir, SplitNode, Tree};
 
 /// Cumulative per-phase wall-clock counters. `Cell` because training is
@@ -83,6 +83,7 @@ impl<'a> TreeLearner<'a> {
             nodes: Vec::new(),
             node_thresholds: Vec::new(),
             node_gains: Vec::new(),
+            category_sets: Vec::new(),
             leaf_values: Vec::new(),
         };
 
@@ -148,16 +149,21 @@ impl<'a> TreeLearner<'a> {
             let t_p = std::time::Instant::now();
             let mut left_indices: Vec<u32> = Vec::with_capacity(split.left_count as usize);
             let mut right_indices: Vec<u32> = Vec::with_capacity(split.right_count as usize);
-            let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
+            let cat_set: Option<Vec<u64>> = split.cat_left_bins.as_ref().map(|bins| bins_to_bitset(bins));
             with_column!(self.dataset, split.feature, |col| {
-                partition_indices(
-                    col,
-                    &parent.indices,
-                    split.threshold_bin,
-                    missing_goes_left,
-                    &mut left_indices,
-                    &mut right_indices,
-                );
+                if let Some(set) = &cat_set {
+                    partition_indices_categorical(col, &parent.indices, set, &mut left_indices, &mut right_indices);
+                } else {
+                    let missing_goes_left = matches!(split.missing_dir, MissingDir::Left);
+                    partition_indices(
+                        col,
+                        &parent.indices,
+                        split.threshold_bin,
+                        missing_goes_left,
+                        &mut left_indices,
+                        &mut right_indices,
+                    );
+                }
             });
             TimingBuckets::add(&self.timing.partition, t_p.elapsed());
 
@@ -178,10 +184,18 @@ impl<'a> TreeLearner<'a> {
             // Threshold and gain go into the parallel `node_thresholds` /
             // `node_gains` arrays — kept off the inference-hot SplitNode.
             let new_node_idx = tree.nodes.len() as i32;
+            let (is_categorical, threshold_bin) = if let Some(set) = cat_set {
+                let idx = tree.category_sets.len() as u16;
+                tree.category_sets.push(set);
+                (1u8, idx)
+            } else {
+                (0u8, split.threshold_bin)
+            };
             tree.nodes.push(SplitNode {
                 feature: split.feature as u32,
-                threshold_bin: split.threshold_bin,
+                threshold_bin,
                 missing_dir: split.missing_dir,
+                is_categorical,
                 left_child: encode_leaf(left_leaf_idx),
                 right_child: encode_leaf(right_leaf_idx),
             });
@@ -283,15 +297,26 @@ impl<'a> TreeLearner<'a> {
             .iter()
             .enumerate()
             .filter_map(|(slot, &feat)| {
-                find_best_split_for_feature(
-                    feat,
-                    &leaf.histograms[slot],
-                    self.dataset.bin_mapper(feat),
-                    leaf.sum_grad,
-                    leaf.sum_hess,
-                    leaf.count,
-                    self.config,
-                )
+                if self.dataset.bin_mapper(feat).is_categorical() {
+                    find_best_categorical_split(
+                        feat,
+                        &leaf.histograms[slot],
+                        leaf.sum_grad,
+                        leaf.sum_hess,
+                        leaf.count,
+                        self.config,
+                    )
+                } else {
+                    find_best_split_for_feature(
+                        feat,
+                        &leaf.histograms[slot],
+                        self.dataset.bin_mapper(feat),
+                        leaf.sum_grad,
+                        leaf.sum_hess,
+                        leaf.count,
+                        self.config,
+                    )
+                }
             })
             .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap_or(std::cmp::Ordering::Equal));
         TimingBuckets::add(&self.timing.split_search, t.elapsed());
@@ -321,7 +346,7 @@ fn partition_indices<B: Bin>(
     let threshold = B::from_u16(threshold_bin);
     let n_parent = parent_indices.len();
     // SAFETY: caller pre-sized left_out/right_out to the exact split counts,
-    // and feat_col covers every row index in parent_indices (DatasetBuilder
+    // and feat_col covers every row index in parent_indices (dataset builder
     // invariant).
     unsafe {
         let lp = left_out.as_mut_ptr();
@@ -339,6 +364,50 @@ fn partition_indices<B: Bin>(
                 bin <= threshold
             };
             if goes_left {
+                *lp.add(li) = i;
+                li += 1;
+            } else {
+                *rp.add(ri) = i;
+                ri += 1;
+            }
+        }
+        left_out.set_len(li);
+        right_out.set_len(ri);
+    }
+}
+
+/// Pack a list of bin codes into a little-endian `u64` bitset.
+fn bins_to_bitset(bins: &[u16]) -> Vec<u64> {
+    let max_bin = bins.iter().copied().max().unwrap_or(0) as usize;
+    let mut set = vec![0u64; max_bin / 64 + 1];
+    for &b in bins {
+        set[b as usize / 64] |= 1u64 << (b as usize % 64);
+    }
+    set
+}
+
+/// Categorical counterpart to [`partition_indices`]: a row goes left iff its
+/// bin code is set in `left_set`.
+fn partition_indices_categorical<B: Bin>(
+    feat_col: &[B],
+    parent_indices: &[u32],
+    left_set: &[u64],
+    left_out: &mut Vec<u32>,
+    right_out: &mut Vec<u32>,
+) {
+    use crate::tree::bitset_contains;
+    let n_parent = parent_indices.len();
+    // SAFETY: same invariants as partition_indices: outputs pre-sized to the
+    // exact split counts, feat_col covers every parent row index.
+    unsafe {
+        let lp = left_out.as_mut_ptr();
+        let rp = right_out.as_mut_ptr();
+        let mut li: usize = 0;
+        let mut ri: usize = 0;
+        for k in 0..n_parent {
+            let i = *parent_indices.get_unchecked(k);
+            let bin = (*feat_col.get_unchecked(i as usize)).as_usize();
+            if bitset_contains(left_set, bin) {
                 *lp.add(li) = i;
                 li += 1;
             } else {

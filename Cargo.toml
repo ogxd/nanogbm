@@ -1,6 +1,6 @@
 [package]
 name = "nanogbm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -19,13 +19,21 @@ exclude = [
     "**/.DS_Store",
 ]
 
+# gxhash requires AES (and SSE2 on x86) intrinsics at compile time. The
+# workspace .cargo/config.toml enables them for local/CI builds, but that file
+# isn't packaged and is ignored when nanogbm is a dependency — so docs.rs would
+# otherwise hit gxhash's compile_error!. Pass the flags through here; docs.rs
+# builds on x86_64-unknown-linux-gnu, so the x86 features apply.
+[package.metadata.docs.rs]
+rustc-args = ["-C", "target-feature=+aes,+sse2"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 bincode = { version = "2.0", features = ["serde"] }
 rand = "0.8"
 rand_chacha = "0.3"
 thiserror = "1.0"
-gxhash = "3.5"
+gxhash = "3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

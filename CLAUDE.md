@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`nanogbm` is a pure-Rust gradient boosting library, deliberately scoped to a narrow subset: **GBDT boosting only**, **binary logistic objective only**, **binary_logloss metric only**, CPU only, dense numerical features with missing-value handling. No DART/GOSS/RF, no categorical features, no sparse input, no GPU, no FFI. Keep changes within this scope unless explicitly asked to expand it.
+`nanogbm` is a pure-Rust gradient boosting library, deliberately scoped to a narrow subset: **GBDT boosting only**, **binary logistic objective only**, **binary_logloss metric only**, CPU only, dense features (numerical with missing-value handling, plus native categorical subset splits), optional per-sample weights. No DART/GOSS/RF, no sparse input, no GPU, no FFI. Keep changes within this scope unless explicitly asked to expand it.
 
 The library crate and the workspace are both called `nanogbm`.
 
@@ -26,7 +26,9 @@ Always prefer `--release` — debug builds of the training loop are orders of ma
 ## Workspace layout
 
 Single crate:
-- `nanogbm/` — the library. Public re-exports from `lib.rs`: `Config`, `Dataset`, `DatasetBuilder`, `GbdtTrainer`, `Model`, `Error`, `Result`, plus the `predict` module.
+- `nanogbm/` — the library. Public re-exports from `lib.rs`: `Config`, `Dataset`, `FeatureBuilder`, `GbdtTrainer`, `Model`, `Error`, `Result`.
+
+The public entry point is `FeatureBuilder<T>`: you declare each feature as `(name, optional max_bin, closure: Fn(&T) -> f64)` over your own row type. `GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, valid)` extracts + bins via the builder and trains; `Model::predict_*(&fb, &rows)` re-extracts through the *same* builder (closures aren't serializable — the model only stores bin mappers and feature names). `Dataset` is the internal binned matrix, built by `FeatureBuilder::build_dataset`; there is no longer a `DatasetBuilder`.
 
 Workspace deps: `serde`, `bincode` v2 (with the `serde` feature), `rand` + `rand_chacha`, `thiserror`. No `rayon`, no math crates — everything is hand-rolled.
 

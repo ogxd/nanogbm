@@ -1,9 +1,9 @@
 # nanogbm
 
 A small gradient boosting library, in pure Rust, with a deliberately narrow
-scope: **GBDT only, binary classification only, CPU only, dense numerical
-features**. No DART/GOSS/RF, no multiclass, no ranking, no regression, no
-sparse inputs, no GPU, no FFI bindings.
+scope: **GBDT only, binary classification only, CPU only, dense features**
+(numerical and categorical). No DART/GOSS/RF, no multiclass, no ranking, no
+regression, no sparse inputs, no GPU, no FFI bindings.
 
 What you get in return is a few thousand lines of code you can read end to
 end and actually follow — useful both as a learning artifact and as a
@@ -11,16 +11,29 @@ no-FFI dependency in a Rust service.
 
 ```toml
 [dependencies]
-nanogbm = "0.4"
+nanogbm = "0.5"
 ```
 
 ```rust
-use nanogbm::{Config, DatasetBuilder, GbdtTrainer};
+use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
+
+struct Row { age: f64, income: f64, active: bool }
 
 let cfg = Config { num_iterations: 100, learning_rate: 0.1, num_leaves: 31, ..Config::default() };
-let train = DatasetBuilder::from_rows(&features, n_rows, n_features, &labels, &cfg)?;
-let model = GbdtTrainer::new(&cfg).fit(&train, None)?;
-let probs = model.predict_proba(&features, n_rows);
+
+// Declare features as named closures over your own row type. Continuous
+// features return an `f64` (NaN for missing); categorical features return any
+// `Hash` value and get native subset splits; booleans are a shorthand.
+let fb = FeatureBuilder::<Row>::new()
+    .add_continuous("age", |r| r.age)
+    .add_continuous("income", |r| r.income)
+    .add_boolean("active", |r| r.active);
+
+// Optional per-row weights: GbdtTrainer::new(&cfg, &fb).with_weights(&w)
+let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None)?;
+
+// The closures live in `fb`, not the model — hand the same builder to predict.
+let probs = model.predict_proba(&fb, &rows);
 ```
 
 ## Why does this exist?
@@ -62,24 +75,26 @@ Performance-wise, nanogbm is supposed to be as fast, if not faster, than LightGB
 - **Bincode v2 serialization** with serde derives. Stable across runs;
   re-check after layout changes to `Tree`, `SplitNode`, `BinMapper`, or
   `Model`.
-- **A feature-encoding helper layer** (`nanogbm::feature`). You write one
-  `encode_into` function that pushes `num`, `bool`, `cat`, `cat_hashed`, or
-  `multi_hot` values into a sink, and run it twice — once with
-  `DiscoverySink` to derive a `Schema`, then with `SliceSink` per row on the
-  hot path. Worth being precise here: the schema *knows* which columns are
-  categorical (the feature-importance printer uses it), but the learner does
-  **not** do native categorical splits. `cat(v)` writes `v as f64`,
-  `cat_hashed` writes a hash bucket index as `f64`, and the trees then split
-  those columns numerically like any other feature. If you need true subset
-  splits, expand to one-hot via `multi_hot` and let the learner work on
-  that.
+- **Native categorical splits.** Declare a column with `add_categorical` and
+  the learner picks a non-contiguous subset of categories per node (not a
+  numeric threshold), the way LightGBM does. `add_boolean` is a shorthand for
+  the two-category case.
+- **Per-sample weights.** `GbdtTrainer::with_weights(&w)` scales the
+  binary-logistic loss per row, carrying through to gradients, leaf values,
+  and split gains (LightGBM's `weight` column).
+- **A declarative feature layer** (`nanogbm::FeatureBuilder`). You declare
+  each column as a named closure over your own row type `T`: `add_continuous`
+  (returns an `f64`, `NaN` for missing), `add_categorical` (returns any `Hash`
+  value), or `add_boolean`. The same builder is handed to training and to
+  `model.predict_*`, because the closures can't be serialized — the saved
+  model only carries bin mappers and feature names and re-extracts through the
+  builder you supply.
 
 ## What's not in the box
 
 | Thing                            | Status                                              |
 |----------------------------------|-----------------------------------------------------|
 | Multiclass / regression / rank   | No                                                  |
-| Native categorical splits        | No — categoricals encode to numeric, see `feature`  |
 | Sparse input                     | No                                                  |
 | DART / GOSS / RF mode            | No                                                  |
 | GPU                              | No                                                  |

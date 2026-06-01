@@ -1,8 +1,7 @@
 pub mod bin_mapper;
-pub mod builder;
+pub(crate) mod builder;
 
 pub use bin_mapper::BinMapper;
-pub use builder::DatasetBuilder;
 
 use serde::{Deserialize, Serialize};
 
