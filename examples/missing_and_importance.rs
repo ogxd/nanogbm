@@ -51,7 +51,7 @@ fn main() {
     let mut fb = FeatureBuilder::<Row>::new();
     for j in 0..d {
         // `move` so each closure captures its own `j`.
-        fb = fb.add(format!("f{j}"), None, move |r| r.f[j]);
+        fb = fb.add_continuous(format!("f{j}"), move |r| r.f[j]);
     }
 
     let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None).unwrap();

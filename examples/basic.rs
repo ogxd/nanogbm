@@ -35,11 +35,11 @@ fn main() {
 
     // Declare features: a name and a closure pulling the value from a Row.
     let fb = FeatureBuilder::<Row>::new()
-        .add("f0", None, |r| r.f[0])
-        .add("f1", None, |r| r.f[1])
-        .add("f2", None, |r| r.f[2])
-        .add("f3", None, |r| r.f[3])
-        .add("f4", None, |r| r.f[4]);
+        .add_continuous("f0", |r| r.f[0])
+        .add_continuous("f1", |r| r.f[1])
+        .add_continuous("f2", |r| r.f[2])
+        .add_continuous("f3", |r| r.f[3])
+        .add_continuous("f4", |r| r.f[4]);
 
     let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None).unwrap();
 

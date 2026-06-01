@@ -32,7 +32,7 @@ type Row = Vec<f64>;
 fn feature_builder() -> FeatureBuilder<Row> {
     let mut fb = FeatureBuilder::<Row>::new();
     for j in 0..N_FEATURES {
-        fb = fb.add(format!("f{j}"), None, move |r: &Row| r[j]);
+        fb = fb.add_continuous(format!("f{j}"), move |r: &Row| r[j]);
     }
     fb
 }

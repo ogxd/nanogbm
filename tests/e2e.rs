@@ -11,7 +11,7 @@ type Row = Vec<f64>;
 fn feature_builder(d: usize) -> FeatureBuilder<Row> {
     let mut fb = FeatureBuilder::<Row>::new();
     for j in 0..d {
-        fb = fb.add(format!("f{j}"), None, move |r: &Row| r[j]);
+        fb = fb.add_continuous(format!("f{j}"), move |r: &Row| r[j]);
     }
     fb
 }
@@ -176,8 +176,8 @@ fn categorical_split_learns_noncontiguous_subset_and_paths_agree() {
     cfg.bagging_fraction = 1.0;
 
     let fb = FeatureBuilder::<Row>::new()
-        .add("noise", None, |r: &Row| r[0])
-        .add_categorical("cat", Some(32), |r: &Row| r[1] as i64);
+        .add_continuous("noise", |r: &Row| r[0])
+        .add_categorical("cat", |r: &Row| r[1] as i64);
     let model = GbdtTrainer::new(&cfg, &fb).fit(&tx, &ty, None).unwrap();
 
     // A categorical split must have been chosen.

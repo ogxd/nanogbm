@@ -23,9 +23,9 @@
 //! };
 //!
 //! let fb = FeatureBuilder::<Row>::new()
-//!     .add("age", None, |r| r.age)
-//!     .add("income", Some(128), |r| r.income)
-//!     .add("active", None, |r| if r.active { 1.0 } else { 0.0 });
+//!     .add_continuous("age", |r| r.age)
+//!     .add_continuous("income", |r| r.income)
+//!     .add_boolean("active", |r| r.active);
 //!
 //! let model = GbdtTrainer::new(&cfg, &fb).fit(&rows, &labels, None)?;
 //! let probs = model.predict_proba(&fb, &rows);
