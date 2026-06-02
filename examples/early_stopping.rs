@@ -3,7 +3,6 @@
 //!
 //! Run with: `cargo run --release --example early_stopping`
 
-use nanogbm::loss::binary_logloss;
 use nanogbm::{Config, FeatureBuilder, GbdtTrainer};
 
 const D: usize = 10;
@@ -61,7 +60,11 @@ fn main() {
         .fit(&tr, &ty, Some((&vr, &vy)))
         .unwrap();
 
-    let scores = model.predict_raw_scores(&fb, &vr);
-    let logloss = binary_logloss(&scores, &vy);
+    let probs = model.predict_proba(&fb, &vr);
+    let n = probs.len() as f64;
+    let logloss = probs.iter().zip(&vy).map(|(&p, &y)| {
+        let p = p.clamp(1e-15, 1.0 - 1e-15);
+        -((y as f64) * p.ln() + (1.0 - y as f64) * (1.0 - p).ln())
+    }).sum::<f64>() / n;
     println!("trees={} valid_logloss={logloss:.5}", model.n_trees());
 }

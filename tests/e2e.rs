@@ -16,6 +16,20 @@ fn feature_builder(d: usize) -> FeatureBuilder<Row> {
     fb
 }
 
+/// Logloss computed directly from predicted probabilities (the public predict
+/// surface returns probabilities, not raw logits).
+fn proba_logloss(probs: &[f64], labels: &[f32]) -> f64 {
+    const EPS: f64 = 1e-15;
+    let n = probs.len() as f64;
+    let mut total = 0.0;
+    for (&p, &y) in probs.iter().zip(labels.iter()) {
+        let p = p.clamp(EPS, 1.0 - EPS);
+        let y = y as f64;
+        total += -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+    }
+    total / n
+}
+
 /// Generate a noisy linearly-separable binary classification problem. `train_n` rows
 /// for training, `valid_n` for validation, with the same underlying weights/bias.
 fn make_classification(
@@ -80,8 +94,8 @@ fn trains_and_reduces_logloss_on_synthetic() {
     let init_only_scores = vec![model.init_score(); n_valid];
     let init_loss = binary_logloss(&init_only_scores, &valid_y);
 
-    let final_scores = model.predict_raw_scores(&fb, &valid_x);
-    let final_loss = binary_logloss(&final_scores, &valid_y);
+    let final_probs = model.predict_proba(&fb, &valid_x);
+    let final_loss = proba_logloss(&final_probs, &valid_y);
 
     println!("init_loss={init_loss:.5} final_loss={final_loss:.5}");
     assert!(
@@ -116,7 +130,10 @@ fn saved_model_round_trip_matches_predictions() {
 }
 
 #[test]
-fn predict_bin_and_raw_paths_agree() {
+fn predict_proba_is_batch_invariant() {
+    // The single predict path walks tree-outer/row-inner over a row-major bin
+    // buffer; a row's prediction must not depend on how many rows share the
+    // batch (per-request batches are tiny, bulk eval batches are huge).
     let n = 400;
     let d = 3;
     let (x, y, _, _) = make_classification(n, 1, d, 9);
@@ -129,22 +146,16 @@ fn predict_bin_and_raw_paths_agree() {
     let fb = feature_builder(d);
     let model = GbdtTrainer::new(&cfg, &fb).fit(&x, &y, None).unwrap();
 
-    let raw = model.predict_raw_scores(&fb, &x);
-    let bin_raw = model.predict_raw_scores_binned(&fb, &x);
-
-    let max_abs = raw
-        .iter()
-        .zip(bin_raw.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(
-        max_abs < 1e-9,
-        "raw vs bin predictions diverged by {max_abs}"
-    );
+    let bulk = model.predict_proba(&fb, &x);
+    // Same rows predicted one-by-one must match the bulk batch bit-for-bit.
+    for (i, row) in x.iter().enumerate() {
+        let single = model.predict_proba(&fb, std::slice::from_ref(row));
+        assert_eq!(single[0], bulk[i], "row {i} differed between single and bulk predict");
+    }
 }
 
 #[test]
-fn categorical_split_learns_noncontiguous_subset_and_paths_agree() {
+fn categorical_split_learns_noncontiguous_subset() {
     // Feature 0 is noise; feature 1 is a categorical id in 0..12 whose label
     // depends on membership in a NON-contiguous "bidding" subset {1,4,7,9}.
     // A numeric threshold on the (arbitrary-order) id cannot separate this; a
@@ -184,48 +195,11 @@ fn categorical_split_learns_noncontiguous_subset_and_paths_agree() {
     let cat_splits: usize = model.trees().iter().map(|t| t.category_sets.len()).sum();
     assert!(cat_splits > 0, "expected at least one categorical split");
 
-    // Raw and binned paths must agree bit-for-bit through the categorical route.
-    let raw = model.predict_proba(&fb, &ex);
-    let binned = model.predict_proba_binned(&fb, &ex);
-    let max_abs = raw.iter().zip(binned.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-    assert!(max_abs < 1e-9, "raw vs binned diverged by {max_abs}");
-
-    // The model must actually separate bidders from non-bidders.
-    let raw_scores = model.predict_raw_scores(&fb, &ex);
-    let ll = binary_logloss(&raw_scores, &ey);
+    // The model must actually separate bidders from non-bidders through the
+    // categorical (subset-membership) route.
+    let probs = model.predict_proba(&fb, &ex);
+    let ll = proba_logloss(&probs, &ey);
     assert!(ll < 0.45, "logloss {ll} too high; categorical subset not learned");
-}
-
-#[test]
-fn predict_proba_binned_matches_raw_proba() {
-    // Binned predict path must produce the same predictions as the raw f64
-    // predict path: the trees carry both `threshold` and `threshold_bin`, and
-    // the model now stores `bin_mappers` so the binned input gets the same
-    // bin codes the trees were trained against.
-    let n_train = 800;
-    let n_eval = 1500;
-    let d = 6;
-    let (tx, ty, ex, _ey) = make_classification(n_train, n_eval, d, 17);
-
-    let mut cfg = Config::default();
-    cfg.num_iterations = 15;
-    cfg.num_leaves = 21;
-    cfg.min_data_in_leaf = 5;
-    cfg.max_bin = 64;
-    cfg.lambda_l2 = 0.5;
-
-    let fb = feature_builder(d);
-    let model = GbdtTrainer::new(&cfg, &fb).fit(&tx, &ty, None).unwrap();
-
-    let raw_proba = model.predict_proba(&fb, &ex);
-    let binned_proba = model.predict_proba_binned(&fb, &ex);
-
-    let max_abs = raw_proba
-        .iter()
-        .zip(binned_proba.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(max_abs < 1e-9, "raw vs binned proba diverged by {max_abs}");
 }
 
 #[test]
@@ -247,8 +221,8 @@ fn binned_predict_survives_bincode_round_trip() {
     model.save(&tmp).unwrap();
     let loaded = Model::load(&tmp).unwrap();
 
-    let before = model.predict_proba_binned(&fb, &ex);
-    let after = loaded.predict_proba_binned(&fb, &ex);
+    let before = model.predict_proba(&fb, &ex);
+    let after = loaded.predict_proba(&fb, &ex);
     for (a, b) in before.iter().zip(after.iter()) {
         assert!((a - b).abs() < 1e-12);
     }

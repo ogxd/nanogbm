@@ -77,37 +77,40 @@ impl Tree {
         }
     }
 
-    /// Predict for a single raw-value feature row.
-    pub fn predict_raw(&self, row: &[f64]) -> f64 {
+    /// Predict for one row of row-major `u16` bin codes (`row[feature]` is the
+    /// bin code for that feature). Same routing as [`Tree::predict_on_columns`]
+    /// but reads a contiguous per-row slice instead of column slices — used by
+    /// the small-batch predict path where the row fits in L1 and the
+    /// column-major materialization isn't worth its allocations.
+    #[inline]
+    pub fn predict_on_row_bins(&self, row: &[u16]) -> f64 {
         if self.nodes.is_empty() {
             return self.leaf_values[0];
         }
         let mut node_idx: i32 = 0;
-        loop {
-            let i = node_idx as usize;
-            let node = &self.nodes[i];
-            let v = row[node.feature as usize];
-            let go_left = if node.is_categorical == 1 {
-                // For categorical features the raw path is fed pre-binned codes
-                // (see `Model::predict_raw_scores`); route by set membership.
-                bitset_contains(&self.category_sets[node.threshold_bin as usize], v as usize)
-            } else {
-                let threshold = self.node_thresholds[i];
-                if !v.is_finite() {
+        // SAFETY: child pointers address a valid node or an encoded leaf; `row`
+        // has one entry per feature, and `node.feature` is bounded by the model
+        // feature count (check_features upholds this on the public entry point).
+        unsafe {
+            loop {
+                let node = self.nodes.get_unchecked(node_idx as usize);
+                let bin = *row.get_unchecked(node.feature as usize);
+                let go_left = if node.is_categorical == 1 {
+                    bitset_contains(
+                        self.category_sets.get_unchecked(node.threshold_bin as usize),
+                        bin as usize,
+                    )
+                } else if bin == crate::dataset::MISSING_BIN {
                     matches!(node.missing_dir, MissingDir::Left)
                 } else {
-                    v <= threshold
+                    bin <= node.threshold_bin
+                };
+                let next = if go_left { node.left_child } else { node.right_child };
+                if next < 0 {
+                    return *self.leaf_values.get_unchecked((!next) as usize);
                 }
-            };
-            let next = if go_left {
-                node.left_child
-            } else {
-                node.right_child
-            };
-            if next < 0 {
-                return self.leaf_values[(!next) as usize];
+                node_idx = next;
             }
-            node_idx = next;
         }
     }
 

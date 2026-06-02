@@ -125,17 +125,29 @@ impl<T> FeatureBuilder<T> {
             .collect()
     }
 
-    /// Extract row-major `f64` data: `out[row * n_features + feat]`. Used by
-    /// the raw-f64 predict path.
-    pub(crate) fn extract_row_major(&self, rows: &[T]) -> Vec<f64> {
+    /// Extract and bin features row-major into `out`: `out[row * n_features + feat]`
+    /// is the `u16` bin code. Fuses extraction and binning in one pass with the
+    /// supplied per-feature `mappers`, so no intermediate f64 column buffers
+    /// are allocated. Used by the small-batch (per-request) predict path where
+    /// allocation, not the tree walk, dominates. `mappers.len()` must equal the
+    /// feature count.
+    pub(crate) fn extract_bins_row_major(
+        &self,
+        rows: &[T],
+        mappers: &[crate::dataset::BinMapper],
+        out: &mut Vec<u16>,
+    ) {
         let nf = self.features.len();
-        let mut out = vec![0.0f64; rows.len() * nf];
+        debug_assert_eq!(mappers.len(), nf);
+        out.clear();
+        out.resize(rows.len() * nf, 0);
         for (i, row) in rows.iter().enumerate() {
+            let base = i * nf;
             for (j, f) in self.features.iter().enumerate() {
-                out[i * nf + j] = (f.extract)(row);
+                let v = (f.extract)(row);
+                out[base + j] = mappers[j].value_to_bin(v);
             }
         }
-        out
     }
 
     /// Extract features from `rows`, fit one [`BinMapper`](crate::dataset::BinMapper)
@@ -241,12 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn extracts_columns_and_rows() {
+    fn extracts_columns() {
         let fb = FeatureBuilder::<Row>::new()
             .add_continuous("a", |r| r.a)
             .add_continuous("b", |r| r.b);
         let rows = vec![Row { a: 1.0, b: 2.0 }, Row { a: 3.0, b: 4.0 }];
         assert_eq!(fb.extract_columns(&rows), vec![vec![1.0, 3.0], vec![2.0, 4.0]]);
-        assert_eq!(fb.extract_row_major(&rows), vec![1.0, 2.0, 3.0, 4.0]);
     }
 }
