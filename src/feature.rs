@@ -160,6 +160,7 @@ impl<T> FeatureBuilder<T> {
         builder::build_dataset(
             columns,
             config.max_bin,
+            config.max_cat_bins,
             &categorical,
             config.min_data_in_bin,
             labels,

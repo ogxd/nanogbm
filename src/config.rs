@@ -68,6 +68,16 @@ pub struct Config {
     /// bin, so at most `max_bin - 1` real bins). Must be in `[2, 65535]`.
     pub max_bin: usize,
 
+    /// Maximum bins per categorical feature (includes one slot for MISSING, so
+    /// at most `max_cat_bins - 1` distinct categories keep their own bin; the
+    /// rarer tail collapses into MISSING). Decoupled from `max_bin` because a
+    /// modest numeric histogram resolution and a high categorical cardinality
+    /// are independent needs: high-cardinality ids (placements, domains,
+    /// networks) lose most of their signal if forced down to `max_bin`. When the
+    /// widest column exceeds 256 bins, storage transparently widens to `u16`.
+    /// Must be in `[2, 65535]`.
+    pub max_cat_bins: usize,
+
     /// Minimum samples per histogram bin when fitting numerical bin mappers.
     /// Bins with fewer samples get merged into neighbors.
     pub min_data_in_bin: usize,
@@ -113,6 +123,7 @@ impl Default for Config {
             max_cat_threshold: 32,
             min_data_per_group: 100,
             max_bin: 255,
+            max_cat_bins: 255,
             min_data_in_bin: 3,
             feature_fraction: 1.0,
             bagging_fraction: 1.0,
@@ -131,6 +142,9 @@ impl Config {
         }
         if self.max_bin < 2 || self.max_bin > 65535 {
             return Err(Error::Config("max_bin must be in [2, 65535]".into()));
+        }
+        if self.max_cat_bins < 2 || self.max_cat_bins > 65535 {
+            return Err(Error::Config("max_cat_bins must be in [2, 65535]".into()));
         }
         if !(0.0 < self.learning_rate && self.learning_rate <= 1.0) {
             return Err(Error::Config("learning_rate must be in (0, 1]".into()));
