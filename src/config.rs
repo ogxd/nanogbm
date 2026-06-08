@@ -97,6 +97,15 @@ pub struct Config {
     /// On stop, the model is truncated to `best_iter + 1` trees.
     pub early_stopping_round: usize,
 
+    /// "Unknown"-value augmentation. For each real training row, with this
+    /// probability append one synthetic copy that forces a single randomly
+    /// chosen categorical feature to the MISSING bin (0), keeping the label and
+    /// all other features. This deliberately trains the bin-0 fallback path so
+    /// the model generalizes to category values unseen at fit time (which also
+    /// map to bin 0). `0.0` disables it (no synthetic rows). Numeric features
+    /// are never masked. Must be `>= 0.0`.
+    pub unknown_aug_fraction: f64,
+
     /// Seed for the `ChaCha8Rng` used for bagging and feature subsampling.
     /// Same config + same data => byte-identical model.
     pub seed: u64,
@@ -129,6 +138,7 @@ impl Default for Config {
             bagging_fraction: 1.0,
             bagging_freq: 0,
             early_stopping_round: 0,
+            unknown_aug_fraction: 0.0,
             seed: 0,
             verbose: false,
         }
@@ -154,6 +164,9 @@ impl Config {
         }
         if !(0.0 < self.bagging_fraction && self.bagging_fraction <= 1.0) {
             return Err(Error::Config("bagging_fraction must be in (0, 1]".into()));
+        }
+        if self.unknown_aug_fraction < 0.0 {
+            return Err(Error::Config("unknown_aug_fraction must be >= 0.0".into()));
         }
         Ok(())
     }

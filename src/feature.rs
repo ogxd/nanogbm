@@ -42,12 +42,19 @@ struct Feature<T> {
 /// ```
 pub struct FeatureBuilder<T> {
     features: Vec<Feature<T>>,
+    /// Names of categorical features eligible for unknown-value augmentation
+    /// (see [`crate::Config::unknown_aug_fraction`]). `None` means every
+    /// categorical is eligible (the default); restrict it with
+    /// [`with_augmentable_features`](Self::with_augmentable_features) to mask
+    /// only the open-vocabulary columns that can see novel values in production.
+    augmentable: Option<std::collections::HashSet<String>>,
 }
 
 impl<T> Default for FeatureBuilder<T> {
     fn default() -> Self {
         Self {
             features: Vec::new(),
+            augmentable: None,
         }
     }
 }
@@ -112,9 +119,28 @@ impl<T> FeatureBuilder<T> {
         self.features.iter().map(|f| f.name.as_str())
     }
 
+    /// Restrict unknown-value augmentation to the named categorical features.
+    /// Names not present in the builder are ignored; non-categorical names have
+    /// no effect (only categoricals are ever masked). Without this call, every
+    /// categorical is eligible.
+    pub fn with_augmentable_features(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.augmentable = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Per-feature categorical flag, in declaration (index) order.
     pub(crate) fn categorical_flags(&self) -> Vec<bool> {
         self.features.iter().map(|f| f.categorical).collect()
+    }
+
+    /// Per-feature mask eligibility for unknown-value augmentation, in
+    /// declaration (index) order: categorical AND (no restriction set, or named
+    /// in it).
+    pub(crate) fn augmentable_flags(&self) -> Vec<bool> {
+        self.features
+            .iter()
+            .map(|f| f.categorical && self.augmentable.as_ref().is_none_or(|s| s.contains(&f.name)))
+            .collect()
     }
 
     /// Extract column-major `f64` data: `out[feat][row]`.
@@ -251,6 +277,19 @@ mod tests {
         assert_eq!(fb.len(), 2);
         let names: Vec<_> = fb.names().collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn augmentable_flags_default_all_categoricals_then_restricted() {
+        let fb = FeatureBuilder::<Row>::new()
+            .add_continuous("a", |r| r.a)
+            .add_categorical("b", |r| r.b as i64)
+            .add_categorical("c", |r| r.a as i64);
+        // Default: every categorical eligible, numeric never.
+        assert_eq!(fb.augmentable_flags(), vec![false, true, true]);
+        // Restricted: only the named categorical (unknown name ignored).
+        let fb = fb.with_augmentable_features(["b", "nonexistent"]);
+        assert_eq!(fb.augmentable_flags(), vec![false, true, false]);
     }
 
     #[test]

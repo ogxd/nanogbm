@@ -49,20 +49,40 @@ impl<'a, T> GbdtTrainer<'a, T> {
                 return Err(Error::Config(format!("weights len {} != labels len {}", w.len(), labels.len())));
             }
         }
-        let train = self.features.build_dataset(rows, labels, self.config)?;
+        let mut train = self.features.build_dataset(rows, labels, self.config)?;
+
+        // "Unknown"-value augmentation: append synthetic rows that mask one
+        // categorical feature to bin 0, training the fallback path for unseen
+        // categories. Only the training set is augmented (never `valid`). Weights
+        // are extended in lockstep so the parallel arrays stay aligned.
+        let mut aug_weights: Option<Vec<f32>> = None;
+        if self.config.unknown_aug_fraction > 0.0 {
+            let mut aug_rng = ChaCha8Rng::seed_from_u64(self.config.seed.wrapping_add(0x9E3779B97F4A7C15));
+            let maskable = self.features.augmentable_flags();
+            let base_rows = train.augment_unknown(self.config.unknown_aug_fraction, &maskable, &mut aug_rng);
+            if let Some(w) = self.weights {
+                let mut wv = Vec::with_capacity(w.len() + base_rows.len());
+                wv.extend_from_slice(w);
+                wv.extend(base_rows.iter().map(|&b| w[b]));
+                aug_weights = Some(wv);
+            }
+        }
+        let weights = aug_weights.as_deref().or(self.weights);
+
         let valid_ds = match valid {
             Some((vr, vl)) => Some(self.features.build_dataset(vr, vl, self.config)?),
             None => None,
         };
-        self.fit_dataset(&train, valid_ds.as_ref())
+        self.fit_dataset(&train, valid_ds.as_ref(), weights)
     }
 
-    /// Core boosting loop over already-binned datasets.
-    fn fit_dataset(&self, train: &Dataset, valid: Option<&Dataset>) -> Result<Model> {
+    /// Core boosting loop over already-binned datasets. `weights` may differ
+    /// from `self.weights` when augmentation has extended it to match `train`.
+    fn fit_dataset(&self, train: &Dataset, valid: Option<&Dataset>, weights: Option<&[f32]>) -> Result<Model> {
 
         let n = train.n_rows();
         let n_features = train.n_features();
-        let init_score = loss::init_score(train.labels(), self.weights);
+        let init_score = loss::init_score(train.labels(), weights);
 
         let mut raw_scores = vec![init_score; n];
         // Packed [grad, hess] pairs — one 8-byte load per row in the histogram
@@ -94,7 +114,7 @@ impl<'a, T> GbdtTrainer<'a, T> {
 
         for iter in 0..self.config.num_iterations {
             let t0 = std::time::Instant::now();
-            loss::gradients_packed(&raw_scores, train.labels(), self.weights, &mut gradhess);
+            loss::gradients_packed(&raw_scores, train.labels(), weights, &mut gradhess);
             t_gradients += t0.elapsed();
 
             let row_indices: &[u32] = if bagging_on {

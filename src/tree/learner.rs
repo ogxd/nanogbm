@@ -285,6 +285,7 @@ impl<'a> TreeLearner<'a> {
     }
 
     fn update_best_split(&self, leaf: &mut LeafState, feature_indices: &[usize]) {
+        use rayon::prelude::*;
         let t = std::time::Instant::now();
         if (leaf.count as usize) < 2 * self.config.min_data_in_leaf
             || leaf.sum_hess < 2.0 * self.config.min_sum_hessian_in_leaf
@@ -293,31 +294,27 @@ impl<'a> TreeLearner<'a> {
             TimingBuckets::add(&self.timing.split_search, t.elapsed());
             return;
         }
-        leaf.best_split = feature_indices
-            .iter()
+        // Per-feature split search is pure (reads histograms + config, no shared
+        // mutation), the dominant fit cost on wide categorical features. Run it
+        // across features in parallel, then reduce sequentially in feature order
+        // so `max_by`'s last-max tie-break is identical to the serial version
+        // (results stay byte-identical).
+        let (sum_grad, sum_hess, count) = (leaf.sum_grad, leaf.sum_hess, leaf.count);
+        let histograms = &leaf.histograms;
+        let candidates: Vec<Option<SplitInfo>> = feature_indices
+            .par_iter()
             .enumerate()
-            .filter_map(|(slot, &feat)| {
+            .map(|(slot, &feat)| {
                 if self.dataset.bin_mapper(feat).is_categorical() {
-                    find_best_categorical_split(
-                        feat,
-                        &leaf.histograms[slot],
-                        leaf.sum_grad,
-                        leaf.sum_hess,
-                        leaf.count,
-                        self.config,
-                    )
+                    find_best_categorical_split(feat, &histograms[slot], sum_grad, sum_hess, count, self.config)
                 } else {
-                    find_best_split_for_feature(
-                        feat,
-                        &leaf.histograms[slot],
-                        self.dataset.bin_mapper(feat),
-                        leaf.sum_grad,
-                        leaf.sum_hess,
-                        leaf.count,
-                        self.config,
-                    )
+                    find_best_split_for_feature(feat, &histograms[slot], self.dataset.bin_mapper(feat), sum_grad, sum_hess, count, self.config)
                 }
             })
+            .collect();
+        leaf.best_split = candidates
+            .into_iter()
+            .flatten()
             .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap_or(std::cmp::Ordering::Equal));
         TimingBuckets::add(&self.timing.split_search, t.elapsed());
     }

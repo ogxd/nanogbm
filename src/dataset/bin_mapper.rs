@@ -196,6 +196,21 @@ mod tests {
     }
 
     #[test]
+    fn categorical_value_zero_does_not_collide_with_missing() {
+        // A real category value of 0 (common for enums) must get its own bin,
+        // distinct from MISSING_BIN, which is reserved for NaN / unseen values.
+        let vals = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let bm = BinMapper::fit_categorical(&vals, 16);
+        let zero_bin = bm.value_to_bin(0.0);
+        assert_ne!(zero_bin, MISSING_BIN, "value 0.0 must not map to the missing bin");
+        assert_ne!(zero_bin, bm.value_to_bin(1.0));
+        assert_ne!(zero_bin, bm.value_to_bin(2.0));
+        // Only genuinely unseen values and NaN land in the missing bin.
+        assert_eq!(bm.value_to_bin(99.0), MISSING_BIN);
+        assert_eq!(bm.value_to_bin(f64::NAN), MISSING_BIN);
+    }
+
+    #[test]
     fn categorical_keeps_most_frequent_when_capped() {
         let vals = vec![1.0, 1.0, 1.0, 2.0, 2.0, 3.0];
         let bm = BinMapper::fit_categorical(&vals, 3);

@@ -122,12 +122,14 @@ impl FeatureHistogram {
     }
 }
 
-/// Row-major batched histogram build: walks `indices` once and updates all
-/// `histograms` in lockstep. This reads `gradhess[row]` ONE TIME per row
-/// (instead of `n_features` times in the naive per-feature loop), cutting
-/// gather traffic on the largest array dramatically — `gradhess` is typically
-/// far bigger than L2/L3, while the histograms themselves (~12 KB per feature)
-/// fit in L1.
+/// Batched histogram build over `indices`, parallelized across features with
+/// rayon. Each feature owns one histogram and is built independently, so there
+/// is no shared mutation across threads. Within a feature, rows are summed in
+/// `indices` order exactly as the single-feature [`FeatureHistogram::build`]
+/// does, so the per-bin f64 sums are byte-identical to a serial build (the
+/// learner's determinism guarantee is preserved). Categorical features carry
+/// very wide histograms (up to `max_cat_bins` bins) and the per-node split
+/// search dominates fit time, so spreading the work across cores is a large win.
 ///
 /// `columns.len()` must equal `histograms.len()`; bins are addressed by
 /// `column[row] as usize` and must be in range of each histogram's `num_bins`.
@@ -138,59 +140,25 @@ pub fn build_histograms_batched<B: Bin>(
     histograms: &mut [FeatureHistogram],
 ) {
     debug_assert_eq!(columns.len(), histograms.len());
-    for h in histograms.iter_mut() {
-        h.clear();
-    }
-    let n_feat = columns.len();
-    // Pre-extract raw pointers so the inner loop doesn't reborrow on every iter.
-    let bin_ptrs: Vec<*mut HistBin> = histograms.iter_mut().map(|h| h.bins.as_mut_ptr()).collect();
-    let col_ptrs: Vec<*const B> = columns.iter().map(|c| c.as_ptr()).collect();
-    // SAFETY: every column has length >= max(indices), every histogram has
-    // capacity matching its column's bin domain (caller upholds via the dataset builder).
-    unsafe {
-        for &i in indices {
-            let row = i as usize;
-            let gh = *gradhess.get_unchecked(row);
-            let g = gh[0] as f64;
-            let h = gh[1] as f64;
-            for fi in 0..n_feat {
-                let bin = (*col_ptrs.get_unchecked(fi).add(row)).as_usize();
-                let b = (*bin_ptrs.get_unchecked(fi)).add(bin);
-                (*b).grad += g;
-                (*b).hess += h;
-                (*b).count += 1;
-            }
-        }
-    }
+    use rayon::prelude::*;
+    histograms
+        .par_iter_mut()
+        .zip(columns.par_iter())
+        .for_each(|(hist, &col)| hist.build(col, indices, gradhess));
 }
 
-/// Row-major batched build for the root level (sequential row iteration, no
-/// `indices` indirection).
+/// Root-level batched build (sequential row iteration, no `indices`), also
+/// parallelized across features. See [`build_histograms_batched`] for the
+/// determinism argument.
 pub fn build_histograms_batched_full<B: Bin>(
     columns: &[&[B]],
     gradhess: &[[f32; 2]],
     histograms: &mut [FeatureHistogram],
 ) {
     debug_assert_eq!(columns.len(), histograms.len());
-    for h in histograms.iter_mut() {
-        h.clear();
-    }
-    let n = gradhess.len();
-    let n_feat = columns.len();
-    let bin_ptrs: Vec<*mut HistBin> = histograms.iter_mut().map(|h| h.bins.as_mut_ptr()).collect();
-    let col_ptrs: Vec<*const B> = columns.iter().map(|c| c.as_ptr()).collect();
-    unsafe {
-        for row in 0..n {
-            let gh = *gradhess.get_unchecked(row);
-            let g = gh[0] as f64;
-            let h = gh[1] as f64;
-            for fi in 0..n_feat {
-                let bin = (*col_ptrs.get_unchecked(fi).add(row)).as_usize();
-                let b = (*bin_ptrs.get_unchecked(fi)).add(bin);
-                (*b).grad += g;
-                (*b).hess += h;
-                (*b).count += 1;
-            }
-        }
-    }
+    use rayon::prelude::*;
+    histograms
+        .par_iter_mut()
+        .zip(columns.par_iter())
+        .for_each(|(hist, &col)| hist.build_full(col, gradhess));
 }

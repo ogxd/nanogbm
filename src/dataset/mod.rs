@@ -137,6 +137,57 @@ impl Dataset {
     pub fn bin_mappers(&self) -> &[BinMapper] {
         &self.bin_mappers
     }
+
+    /// Append "unknown"-value synthetic rows in place (see
+    /// [`crate::Config::unknown_aug_fraction`]). For each existing row, with
+    /// probability `fraction`, append a copy with one randomly chosen
+    /// *maskable* feature forced to [`MISSING_BIN`], carrying the same label.
+    /// This trains the bin-0 fallback path that unseen category values map to.
+    /// `maskable[f]` selects which columns are eligible (typically categorical
+    /// open-vocabulary features; see `FeatureBuilder::augmentable_flags`).
+    ///
+    /// Returns the base-row index for each appended row (parallel to the new
+    /// rows), so the caller can extend per-row weights consistently. No-op
+    /// (returns empty) when `fraction <= 0` or no feature is maskable.
+    pub(crate) fn augment_unknown(&mut self, fraction: f64, maskable: &[bool], rng: &mut impl rand::Rng) -> Vec<usize> {
+        let cat_feats: Vec<usize> = (0..self.n_features).filter(|&f| maskable.get(f).copied().unwrap_or(false)).collect();
+        if fraction <= 0.0 || cat_feats.is_empty() {
+            return Vec::new();
+        }
+        let base_rows = self.n_rows;
+        // Plan: (base_row, feature_to_mask) for each accepted row.
+        let mut plan: Vec<(usize, usize)> = Vec::new();
+        for row in 0..base_rows {
+            if rng.r#gen::<f64>() < fraction {
+                let m = cat_feats[rng.gen_range(0..cat_feats.len())];
+                plan.push((row, m));
+            }
+        }
+        if plan.is_empty() {
+            return Vec::new();
+        }
+        match &mut self.bin_data {
+            BinData::U8(cols) => append_masked(cols, &plan, 0u8),
+            BinData::U16(cols) => append_masked(cols, &plan, 0u16),
+        }
+        for &(base, _) in &plan {
+            self.labels.push(self.labels[base]);
+        }
+        self.n_rows += plan.len();
+        plan.into_iter().map(|(base, _)| base).collect()
+    }
+}
+
+/// Copy each planned base row across every column, then overwrite the masked
+/// feature's value with `missing` (bin 0).
+fn append_masked<B: Bin>(cols: &mut [Vec<B>], plan: &[(usize, usize)], missing: B) {
+    for (feat, col) in cols.iter_mut().enumerate() {
+        col.reserve(plan.len());
+        for &(base, mask) in plan {
+            let v = if feat == mask { missing } else { col[base] };
+            col.push(v);
+        }
+    }
 }
 
 /// Run `$body` once per dataset bin width with `$cols` bound to a
@@ -179,3 +230,47 @@ macro_rules! with_column {
 
 pub(crate) use with_column;
 pub(crate) use with_columns;
+
+#[cfg(test)]
+mod augment_tests {
+    use super::MISSING_BIN;
+    use super::builder::build_dataset;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn augment_unknown_masks_one_categorical_per_synthetic_row() {
+        // Column 0: categorical (3 values), column 1: numeric.
+        let cols = vec![vec![10.0, 20.0, 30.0, 10.0], vec![1.0, 2.0, 3.0, 4.0]];
+        let labels = vec![1.0f32, 0.0, 1.0, 0.0];
+        let mut ds = build_dataset(cols, 16, 16, &[true, false], 1, &labels).unwrap();
+        let base_rows = ds.n_rows();
+
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let base_idx = ds.augment_unknown(1.0, &[true, false], &mut rng);
+
+        // fraction 1.0 → every base row spawns one synthetic row.
+        assert_eq!(base_idx.len(), base_rows);
+        assert_eq!(ds.n_rows(), base_rows * 2);
+
+        for (i, &base) in base_idx.iter().enumerate() {
+            let row = base_rows + i;
+            // Label carried over from the base row.
+            assert_eq!(ds.labels()[row], ds.labels()[base]);
+            // Categorical column 0 is the only maskable feature, so it must be
+            // MISSING (0) on every synthetic row; numeric column 1 is untouched.
+            assert_eq!(ds.feature_bin(0, row), MISSING_BIN);
+            assert_eq!(ds.feature_bin(1, row), ds.feature_bin(1, base));
+        }
+    }
+
+    #[test]
+    fn augment_unknown_noop_without_categoricals() {
+        let cols = vec![vec![1.0, 2.0, 3.0]];
+        let labels = vec![1.0f32, 0.0, 1.0];
+        let mut ds = build_dataset(cols, 16, 16, &[false], 1, &labels).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        assert!(ds.augment_unknown(1.0, &[false], &mut rng).is_empty());
+        assert_eq!(ds.n_rows(), 3);
+    }
+}
